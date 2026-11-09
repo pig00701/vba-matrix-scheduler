@@ -1,0 +1,13 @@
+# Excel temporary and lock files
+~$*.xlsx
+~$*.xlsm
+~$*.xlsb
+*.tmp
+
+# Python cache
+__pycache__/
+*.pyc
+
+# OS metadata
+Thumbs.db
+.DS_Store
