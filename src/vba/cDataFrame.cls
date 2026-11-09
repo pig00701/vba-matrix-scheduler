@@ -32,6 +32,10 @@ Private mIndexColumnNames() As String ' 1-based array of active index column nam
 Private mIndexColCount As Long        ' Number of columns in active index
 Private mIndexSkipEmpty As Boolean    ' SkipEmptyKeys flag for index rebuild
 Private mIndexDirty As Boolean        ' True if index needs rebuild due to mutation
+Private mColList() As cColumn         ' Cached flat array of columns for fast AddRow iteration
+Private mColListCount As Long         ' Number of cached columns in mColList
+Private mCaseSensitive As Boolean     ' True for vbBinaryCompare, False for vbTextCompare
+Private mRenamedHeaders As Object     ' Scripting.Dictionary of renamed duplicate headers
 
 ' ------------------------------------------------------------------------------
 ' Lifecycle
@@ -46,12 +50,117 @@ Private Sub Class_Initialize()
     mIndexColCount = 0
     mIndexSkipEmpty = True
     mIndexDirty = False
+    mColListCount = 0
+    Erase mColList
+    mCaseSensitive = False
+    Set mRenamedHeaders = CreateObject("Scripting.Dictionary")
+    mRenamedHeaders.CompareMode = 1
 End Sub
 
 Private Sub Class_Terminate()
     Set mCols = Nothing
     Set mRowIndexMap = Nothing
+    Set mRenamedHeaders = Nothing
+    Erase mColList
+    mColListCount = 0
 End Sub
+
+' ------------------------------------------------------------------------------
+' Schema Cache, Case Sensitivity & Header Deduplication
+' ------------------------------------------------------------------------------
+
+Private Sub SyncColList()
+    Dim numCols As Long, c As Long
+    numCols = mCols.Count
+    mColListCount = numCols
+    If numCols = 0 Then
+        Erase mColList
+        Exit Sub
+    End If
+    ReDim mColList(1 To numCols)
+    Dim keys As Variant
+    keys = mCols.Keys
+    For c = 1 To numCols
+        Set mColList(c) = mCols.Item(keys(c - 1))
+    Next c
+End Sub
+
+Public Property Get CaseSensitive() As Boolean
+    CaseSensitive = mCaseSensitive
+End Property
+
+Public Property Let CaseSensitive(ByVal Value As Boolean)
+    If Value = mCaseSensitive Then Exit Property
+    mCaseSensitive = Value
+    Dim newMode As Long
+    newMode = IIf(Value, 0, 1) ' 0 = vbBinaryCompare, 1 = vbTextCompare
+
+    Dim newDict As Object
+    Set newDict = CreateObject("Scripting.Dictionary")
+    newDict.CompareMode = newMode
+
+    Dim keys As Variant, c As Long
+    keys = mCols.Keys
+    For c = 0 To mCols.Count - 1
+        newDict.Add keys(c), mCols.Item(keys(c))
+    Next c
+    Set mCols = newDict
+    SyncColList
+
+    If Not mRowIndexMap Is Nothing Then
+        mIndexDirty = True
+    End If
+End Property
+
+Public Property Get DuplicateHeadersRenamed() As Variant
+    If mRenamedHeaders Is Nothing Then
+        DuplicateHeadersRenamed = Array()
+        Exit Property
+    End If
+    DuplicateHeadersRenamed = mRenamedHeaders.Keys
+End Property
+
+Public Function ResolveUniqueHeader(ByVal CandidateName As String, _
+                                    Optional ByVal AutoRename As Boolean = True) As String
+    Dim cleanName As String, testName As String, suffix As Long
+    cleanName = Trim$(CandidateName)
+    If Len(cleanName) = 0 Then cleanName = "Column"
+
+    If Not mCols.Exists(cleanName) Then
+        ResolveUniqueHeader = cleanName
+        Exit Function
+    End If
+
+    If Not AutoRename Then
+        Err.Raise 457, "cDataFrame.ResolveUniqueHeader", "Column already exists: '" & cleanName & "'"
+    End If
+
+    suffix = 2
+    Do
+        testName = cleanName & "_" & suffix
+        If Not mCols.Exists(testName) Then
+            ResolveUniqueHeader = testName
+            If Not mRenamedHeaders.Exists(cleanName) Then
+                mRenamedHeaders.Add cleanName, testName
+            End If
+            Exit Function
+        End If
+        suffix = suffix + 1
+    Loop
+End Function
+
+Public Sub ShrinkToFit()
+    Dim c As Long
+    For c = 1 To mColListCount
+        mColList(c).ShrinkToFit
+    Next c
+End Sub
+
+Private Function FormatCompositeKeyPart(ByVal v As Variant) As String
+    Dim s As String
+    s = SafeKeyString(v)
+    FormatCompositeKeyPart = CStr(Len(s)) & ":" & s & "|"
+End Function
 
 ' ------------------------------------------------------------------------------
 ' Primary Properties & Default Member
@@ -109,17 +218,10 @@ End Property
 ' Add a new column (O(1)). Optional DefaultValue or 1D array.
 Public Function AddColumn(ByVal Name As String, _
                           Optional ByVal DefaultValue As Variant = Empty, _
-                          Optional ByVal Array1D As Variant) As cColumn
+                          Optional ByVal Array1D As Variant, _
+                          Optional ByVal AutoRename As Boolean = False) As cColumn
     Dim cleanName As String
-    cleanName = Trim$(Name)
-
-    If Len(cleanName) = 0 Then
-        Err.Raise 5, "cDataFrame.AddColumn", "Column name cannot be blank."
-    End If
-
-    If mCols.Exists(cleanName) Then
-        Err.Raise 457, "cDataFrame.AddColumn", "Column already exists: '" & cleanName & "'"
-    End If
+    cleanName = ResolveUniqueHeader(Name, AutoRename)
 
     Dim newCol As New cColumn
     newCol.Name = cleanName
@@ -147,6 +249,7 @@ Public Function AddColumn(ByVal Name As String, _
     End If
 
     mCols.Add cleanName, newCol
+    SyncColList
     Set AddColumn = newCol
 End Function
 
@@ -163,6 +266,7 @@ Public Sub DropColumn(ByVal ColumnKey As Variant)
     If mCols.Count = 0 Then
         mRowCount = 0
     End If
+    SyncColList
 End Sub
 
 ' Rename column (O(1) in-place dictionary key reassignment)
@@ -203,6 +307,7 @@ Public Sub RenameColumn(ByVal OldName As String, ByVal NewName As String)
             mIndexColumnName = Join(mIndexColumnNames, ", ")
         End If
     End If
+    SyncColList
 End Sub
 
 Public Sub ReorderColumns(ByVal NewOrderArray As Variant)
@@ -237,6 +342,7 @@ Public Sub ReorderColumns(ByVal NewOrderArray As Variant)
     Next i
 
     Set mCols = newDict
+    SyncColList
 End Sub
 
 Public Function HasColumn(ByVal ColumnKey As Variant) As Boolean
@@ -283,8 +389,9 @@ End Function
 Public Function AddRow(ParamArray Values() As Variant) As Long
     mRowCount = mRowCount + 1
 
-    Dim keys As Variant
-    keys = mCols.Keys
+    If mColListCount <> mCols.Count Then
+        SyncColList
+    End If
 
     Dim isArrayPassed As Boolean
     Dim passedArr As Variant
@@ -296,28 +403,26 @@ Public Function AddRow(ParamArray Values() As Variant) As Long
         End If
     End If
 
-    Dim c As Long, col As cColumn
+    Dim c As Long
     If isArrayPassed Then
         Dim arrLb As Long, arrUb As Long
         arrLb = LBound(passedArr)
         arrUb = UBound(passedArr)
-        For c = 0 To mCols.Count - 1
-            Set col = mCols.Item(keys(c))
-            If (arrLb + c) <= arrUb Then
-                col.Append passedArr(arrLb + c)
+        For c = 1 To mColListCount
+            If (arrLb + c - 1) <= arrUb Then
+                mColList(c).Append passedArr(arrLb + c - 1)
             Else
-                col.Append Empty
+                mColList(c).Append Empty
             End If
         Next c
     Else
         Dim numVals As Long
         numVals = UBound(Values) - LBound(Values) + 1
-        For c = 0 To mCols.Count - 1
-            Set col = mCols.Item(keys(c))
-            If c < numVals Then
-                col.Append Values(LBound(Values) + c)
+        For c = 1 To mColListCount
+            If c <= numVals Then
+                mColList(c).Append Values(LBound(Values) + c - 1)
             Else
-                col.Append Empty
+                mColList(c).Append Empty
             End If
         Next c
     End If
@@ -532,10 +637,7 @@ Public Sub SetIndex(ByVal ColumnNames As Variant, Optional ByVal SkipEmptyKeys A
 
     Dim dict As Object
     Set dict = CreateObject("Scripting.Dictionary")
-    dict.CompareMode = 1  ' vbTextCompare (case-insensitive lookup)
-
-    Dim unitSep As String
-    unitSep = Chr$(30)
+    dict.CompareMode = IIf(mCaseSensitive, 0, 1)
 
     Dim r As Long, compKey As String, partKey As String, allEmpty As Boolean
     For r = 1 To mRowCount
@@ -543,12 +645,12 @@ Public Sub SetIndex(ByVal ColumnNames As Variant, Optional ByVal SkipEmptyKeys A
             compKey = Trim$(SafeKeyString(idxCols(1).Item(r)))
             allEmpty = (Len(compKey) = 0)
         Else
-            compKey = Trim$(SafeKeyString(idxCols(1).Item(r)))
-            allEmpty = (Len(compKey) = 0)
-            For k = 2 To numIdxCols
-                partKey = Trim$(SafeKeyString(idxCols(k).Item(r)))
-                If Len(partKey) > 0 Then allEmpty = False
-                compKey = compKey & unitSep & partKey
+            compKey = ""
+            allEmpty = True
+            For k = 1 To numIdxCols
+                partKey = SafeKeyString(idxCols(k).Item(r))
+                If Len(Trim$(partKey)) > 0 Then allEmpty = False
+                compKey = compKey & FormatCompositeKeyPart(partKey)
             Next k
         End If
 
@@ -557,7 +659,7 @@ Public Sub SetIndex(ByVal ColumnNames As Variant, Optional ByVal SkipEmptyKeys A
         Else
             If dict.Exists(compKey) Then
                 Err.Raise 457, "cDataFrame.SetIndex", _
-                    "Duplicate key found in index (" & Join(resolvedNames, ", ") & "): '" & Replace(compKey, unitSep, "|") & "' at row " & r
+                    "Duplicate key found in index (" & Join(resolvedNames, ", ") & "): '" & compKey & "' at row " & r
             End If
             dict.Add compKey, r
         End If
@@ -693,11 +795,10 @@ Private Function ResolveLocKeyString(ByVal RowKey As Variant) As String
             Err.Raise 5, "cDataFrame.Loc", _
                 "Composite RowKey length (" & numK & ") does not match index column count (" & mIndexColCount & ")."
         End If
-        Dim comp As String, unitSep As String
-        unitSep = Chr$(30)
-        comp = Trim$(SafeKeyString(RowKey(lb)))
-        For k = 2 To numK
-            comp = comp & unitSep & Trim$(SafeKeyString(RowKey(lb + k - 1)))
+        Dim comp As String
+        comp = ""
+        For k = 1 To numK
+            comp = comp & FormatCompositeKeyPart(RowKey(lb + k - 1))
         Next k
         ResolveLocKeyString = comp
     Else
@@ -839,31 +940,40 @@ End Sub
 
 Private Sub QuickSortIndices(ByRef idx() As Long, ByVal low As Long, ByVal high As Long, _
                              ByRef sortCols() As cColumn, ByRef ascFlags() As Boolean, ByVal numKeys As Long)
-    Dim i As Long, j As Long
-    Dim pivotRow As Long
-    i = low
-    j = high
-    pivotRow = idx((low + high) \ 2)
+    Do While low < high
+        Dim i As Long, j As Long
+        Dim pivotRow As Long
+        i = low
+        j = high
+        pivotRow = idx((low + high) \ 2)
 
-    Do While i <= j
-        Do While CompareRows(idx(i), pivotRow, sortCols, ascFlags, numKeys) < 0
-            i = i + 1
+        Do While i <= j
+            Do While CompareRows(idx(i), pivotRow, sortCols, ascFlags, numKeys) < 0
+                i = i + 1
+            Loop
+            Do While CompareRows(idx(j), pivotRow, sortCols, ascFlags, numKeys) > 0
+                j = j - 1
+            Loop
+            If i <= j Then
+                Dim temp As Long
+                temp = idx(i)
+                idx(i) = idx(j)
+                idx(j) = temp
+                i = i + 1
+                j = j - 1
+            End If
         Loop
-        Do While CompareRows(idx(j), pivotRow, sortCols, ascFlags, numKeys) > 0
-            j = j - 1
-        Loop
-        If i <= j Then
-            Dim temp As Long
-            temp = idx(i)
-            idx(i) = idx(j)
-            idx(j) = temp
-            i = i + 1
-            j = j - 1
+
+        ' Tail-call optimization: recurse on smaller half, loop on larger half
+        ' Guarantees call stack depth <= log2(N) (never exceeds 20 frames for 1M rows)
+        If (j - low) < (high - i) Then
+            If low < j Then QuickSortIndices idx, low, j, sortCols, ascFlags, numKeys
+            low = i
+        Else
+            If i < high Then QuickSortIndices idx, i, high, sortCols, ascFlags, numKeys
+            high = j
         End If
     Loop
-
-    If low < j Then QuickSortIndices idx, low, j, sortCols, ascFlags, numKeys
-    If i < high Then QuickSortIndices idx, i, high, sortCols, ascFlags, numKeys
 End Sub
 
 Private Function CompareRows(ByVal rowA As Long, ByVal rowB As Long, _
@@ -956,7 +1066,7 @@ Private Function CompareSortValues(ByVal vA As Variant, ByVal vB As Variant) As 
         End If
     Else
         Dim sc As Long
-        sc = StrComp(CStr(vA), CStr(vB), vbTextCompare)
+        sc = StrComp(CStr(vA), CStr(vB), IIf(mCaseSensitive, vbBinaryCompare, vbTextCompare))
         If sc < 0 Then
             CompareSortValues = -1
         ElseIf sc > 0 Then

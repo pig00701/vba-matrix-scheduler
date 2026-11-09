@@ -37,6 +37,14 @@ Private Sub Class_Initialize()
 End Sub
 
 Private Sub Class_Terminate()
+    Dim i As Long
+    On Error Resume Next
+    For i = 1 To mCount
+        If IsObject(mData(i)) Then
+            Set mData(i) = Nothing
+        End If
+    Next i
+    On Error GoTo 0
     Erase mData
 End Sub
 
@@ -100,11 +108,25 @@ Public Sub EnsureCapacity(ByVal RequiredCapacity As Long)
     If newCap < DEFAULT_CAPACITY Then newCap = DEFAULT_CAPACITY
 
     Do While newCap < RequiredCapacity
-        newCap = CLng(newCap * GROWTH_FACTOR)
+        If newCap < 10000 Then
+            newCap = CLng(newCap * 2#)
+        ElseIf newCap < 100000 Then
+            newCap = CLng(newCap * 1.5)
+        Else
+            newCap = CLng(newCap * 1.25)
+        End If
     Loop
 
     ReDim Preserve mData(1 To newCap)
     mCapacity = newCap
+End Sub
+
+Public Sub ShrinkToFit()
+    If mCapacity > mCount Then
+        mCapacity = mCount
+        If mCapacity < DEFAULT_CAPACITY Then mCapacity = DEFAULT_CAPACITY
+        ReDim Preserve mData(1 To mCapacity)
+    End If
 End Sub
 
 Public Sub SetCount(ByVal NewCount As Long, Optional ByVal DefaultValue As Variant = Empty)
@@ -290,6 +312,56 @@ Public Function ToArray() As Variant
     Next i
 
     ToArray = res
+End Function
+
+Public Function ToDoubleArray() As Double()
+    Dim res() As Double
+    If mCount = 0 Then
+        ToDoubleArray = res
+        Exit Function
+    End If
+    ReDim res(1 To mCount)
+    Dim i As Long
+    For i = 1 To mCount
+        If IsNumeric(mData(i)) And Not IsEmpty(mData(i)) Then
+            res(i) = CDbl(mData(i))
+        Else
+            res(i) = 0#
+        End If
+    Next i
+    ToDoubleArray = res
+End Function
+
+Public Function ToLongArray() As Long()
+    Dim res() As Long
+    If mCount = 0 Then
+        ToLongArray = res
+        Exit Function
+    End If
+    ReDim res(1 To mCount)
+    Dim i As Long
+    For i = 1 To mCount
+        If IsNumeric(mData(i)) And Not IsEmpty(mData(i)) Then
+            res(i) = CLng(mData(i))
+        Else
+            res(i) = 0&
+        End If
+    Next i
+    ToLongArray = res
+End Function
+
+Public Function ToStringArray() As String()
+    Dim res() As String
+    If mCount = 0 Then
+        ToStringArray = res
+        Exit Function
+    End If
+    ReDim res(1 To mCount)
+    Dim i As Long
+    For i = 1 To mCount
+        res(i) = CStr(mData(i))
+    Next i
+    ToStringArray = res
 End Function
 
 Public Sub LoadFromArray(ByVal SourceArray As Variant)
