@@ -1,0 +1,6 @@
+# Treat Excel and Office macro files as binary to prevent line ending corruption
+*.xlsm binary
+*.xlsx binary
+*.xlam binary
+*.xlsb binary
+*.zip binary
