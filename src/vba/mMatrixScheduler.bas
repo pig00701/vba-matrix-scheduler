@@ -3,17 +3,21 @@ Option Explicit
 
 ' ==============================================================================
 ' Module: mMatrixScheduler
-' Description: High-performance 2D Matrix Schedule Generator and Cell Mapper
-'              powered by the cDataFrame in-memory columnar engine.
-' Features:
-'   1. Generates 2D Matrix (Rows: Grouped Teams & Persons, Cols: Day 1..N)
-'   2. Maps Event/Shift transactions into Matrix cell intersections via O(1) Loc
-'   3. Multi-conflict handling (CONCAT, OVERWRITE, SUM)
-'   4. Beautiful presentation styling with team banners & status color tags
+' Description: 30-Day Employee Scheduling Matrix & Event Mapping Engine.
+'              Demonstrates high-performance In-Memory Matrix transformation,
+'              O(1) Loc 2-way lookups, and presentation styling using cDataFrame
+'              and cTableStyler.
+' Author: Korn (AI Backend Developer, Technodevmoo)
+' Architecture: Kit (Tech Lead)
+' ==============================================================================
+
+' ==============================================================================
+' Interactive Button Handlers (Assigned to Worksheet Form Controls)
 ' ==============================================================================
 
 Public Sub Btn_GenerateMatrix()
-    Dim wsEmp As Worksheet, wsMatrix As Worksheet
+    Dim wsEmp As Worksheet
+    Dim wsMatrix As Worksheet
     Dim tbEmp As ListObject
     
     On Error GoTo ErrHandler
@@ -23,10 +27,11 @@ Public Sub Btn_GenerateMatrix()
     Set wsMatrix = ThisWorkbook.Sheets("ScheduleMatrix")
     Set tbEmp = wsEmp.ListObjects("tbEmployees")
     
+    ' Generate 30-day matrix starting at cell B5 with SpacerRows between teams
     GenerateMatrixFromTable tbEmp, wsMatrix.Range("B5"), 30, "Team", "Name", True
     
     Application.ScreenUpdating = True
-    MsgBox "Matrix Schedule generated successfully for 30 days!", vbInformation, "Matrix Generator"
+    MsgBox "Schedule Matrix successfully generated in RAM and dumped to sheet!", vbInformation, "Matrix Generator"
     Exit Sub
 
 ErrHandler:
@@ -35,7 +40,8 @@ ErrHandler:
 End Sub
 
 Public Sub Btn_MapEvents()
-    Dim wsEvents As Worksheet, wsMatrix As Worksheet
+    Dim wsEvents As Worksheet
+    Dim wsMatrix As Worksheet
     Dim tbEvents As ListObject
     Dim matchCount As Long
     
@@ -84,6 +90,26 @@ Public Sub Btn_RunAll()
     Btn_MapEvents
 End Sub
 
+' Headless initializers (Zero-argument wrappers for automated build scripts)
+Public Sub GenerateDefaultMatrix()
+    Dim wsEmp As Worksheet, wsMatrix As Worksheet
+    Dim tbEmp As ListObject
+    Set wsEmp = ThisWorkbook.Sheets("Employees")
+    Set wsMatrix = ThisWorkbook.Sheets("ScheduleMatrix")
+    Set tbEmp = wsEmp.ListObjects("tbEmployees")
+    GenerateMatrixFromTable tbEmp, wsMatrix.Range("B5"), 30, "Team", "Name", True
+End Sub
+
+Public Sub MapDefaultEvents()
+    Dim wsEvents As Worksheet, wsMatrix As Worksheet
+    Dim tbEvents As ListObject
+    Set wsEvents = ThisWorkbook.Sheets("Events")
+    Set wsMatrix = ThisWorkbook.Sheets("ScheduleMatrix")
+    Set tbEvents = wsEvents.ListObjects("tbEvents")
+    MapEventsToMatrix tbEvents, wsMatrix.Range("B5"), "Person", "Day", "Status", "CONCAT"
+    ApplyStatusFormatting wsMatrix.Range("B5")
+End Sub
+
 ' ==============================================================================
 ' Core Engine Procedures
 ' ==============================================================================
@@ -103,10 +129,10 @@ Public Sub GenerateMatrixFromTable(ByVal SourceTable As ListObject, _
     
     Set targetWs = StartCell.Worksheet
     
-    ' 1. Clear existing matrix range
+    ' 1. Clear target area
     clearEndRow = targetWs.Cells(targetWs.Rows.Count, StartCell.Column).End(xlUp).Row
     clearEndCol = targetWs.Cells(StartCell.Row, targetWs.Columns.Count).End(xlToLeft).Column
-    If clearEndRow < StartCell.Row Then clearEndRow = StartCell.Row + 200
+    If clearEndRow < StartCell.Row + 50 Then clearEndRow = StartCell.Row + 50
     If clearEndCol < StartCell.Column + NumDays Then clearEndCol = StartCell.Column + NumDays
     
     targetWs.Range(StartCell, targetWs.Cells(clearEndRow, clearEndCol)).ClearContents
@@ -142,16 +168,16 @@ Public Sub GenerateMatrixFromTable(ByVal SourceTable As ListObject, _
     ' 5. Dump Matrix to Target Sheet in a Single COM Call
     dfMatrix.ToRange StartCell
     
-    ' 6. Apply Header & Banner Styling
-    FormatMatrixLayout StartCell, dfMatrix.RowCount, dfMatrix.ColumnCount
+    ' 6. Apply Header & Layout Styling via cTableStyler
+    FormatMatrixLayout StartCell, dfMatrix
 End Sub
 
 Public Function MapEventsToMatrix(ByVal EventsTable As ListObject, _
-                                 ByVal StartCell As Range, _
-                                 Optional ByVal PersonCol As String = "Person", _
-                                 Optional ByVal DateCol As String = "Day", _
-                                 Optional ByVal StatusCol As String = "Status", _
-                                 Optional ByVal ConflictMode As String = "CONCAT") As Long
+                                  ByVal StartCell As Range, _
+                                  Optional ByVal PersonCol As String = "Person", _
+                                  Optional ByVal DateCol As String = "Day", _
+                                  Optional ByVal StatusCol As String = "Status", _
+                                  Optional ByVal ConflictMode As String = "CONCAT") As Long
     Dim dfMatrix As New cDataFrame
     Dim dfEvents As New cDataFrame
     Dim targetWs As Worksheet
@@ -200,19 +226,19 @@ Public Function MapEventsToMatrix(ByVal EventsTable As ListObject, _
             existingVal = dfMatrix.Loc(person, dateKey)
             
             Select Case UCase$(ConflictMode)
+                Case "OVERWRITE"
+                    dfMatrix.Loc(person, dateKey) = statusVal
                 Case "CONCAT"
-                    If IsEmpty(existingVal) Or Len(Trim$(CStr(existingVal))) = 0 Then
-                        dfMatrix.Loc(person, dateKey) = statusVal
-                    ElseIf InStr(1, CStr(existingVal), CStr(statusVal), vbTextCompare) = 0 Then
-                        dfMatrix.Loc(person, dateKey) = existingVal & " / " & statusVal
-                    End If
-                Case "SUM"
-                    If IsNumeric(existingVal) And IsNumeric(statusVal) Then
-                        dfMatrix.Loc(person, dateKey) = CDbl(existingVal) + CDbl(statusVal)
+                    If Len(Trim$(CStr(existingVal))) > 0 Then
+                        dfMatrix.Loc(person, dateKey) = CStr(existingVal) & "/" & CStr(statusVal)
                     Else
                         dfMatrix.Loc(person, dateKey) = statusVal
                     End If
-                Case Else ' OVERWRITE
+                Case "KEEP_FIRST"
+                    If Len(Trim$(CStr(existingVal))) = 0 Then
+                        dfMatrix.Loc(person, dateKey) = statusVal
+                    End If
+                Case Else
                     dfMatrix.Loc(person, dateKey) = statusVal
             End Select
             
@@ -227,71 +253,29 @@ Public Function MapEventsToMatrix(ByVal EventsTable As ListObject, _
 End Function
 
 ' ==============================================================================
-' Styling & Presentation Helpers
+' Styling & Presentation Helpers (Powered by cTableStyler)
 ' ==============================================================================
 
-Private Sub FormatMatrixLayout(ByVal StartCell As Range, ByVal RowCount As Long, ByVal ColCount As Long)
-    Dim ws As Worksheet
-    Dim headerRange As Range
-    Dim fullRange As Range
-    Dim r As Long, rowNum As Long
-    Dim cellVal As String
-    
-    Set ws = StartCell.Worksheet
-    Set headerRange = ws.Range(StartCell, ws.Cells(StartCell.Row, StartCell.Column + ColCount - 1))
-    Set fullRange = ws.Range(StartCell, ws.Cells(StartCell.Row + RowCount - 1, StartCell.Column + ColCount - 1))
-    
-    ' Header Style (Deep Navy Blue)
-    With headerRange
-        .Interior.Color = RGB(31, 58, 82)
-        .Font.Color = RGB(255, 255, 255)
-        .Font.Bold = True
-        .HorizontalAlignment = xlCenter
-        .VerticalAlignment = xlCenter
-        .RowHeight = 26
-    End With
-    
-    ' Grid Lines
-    fullRange.Borders.LineStyle = xlContinuous
-    fullRange.Borders.Color = RGB(218, 224, 233)
-    fullRange.Borders.Weight = xlThin
-    
-    ' Highlight Team Section Banners
-    For r = 2 To RowCount
-        rowNum = StartCell.Row + r - 1
-        cellVal = Trim$(CStr(ws.Cells(rowNum, StartCell.Column).Value))
-        
-        If Left$(cellVal, 8) = "[ TEAM: " Then
-            With ws.Range(ws.Cells(rowNum, StartCell.Column), ws.Cells(rowNum, StartCell.Column + ColCount - 1))
-                .Interior.Color = RGB(225, 235, 245)
-                .Font.Color = RGB(20, 45, 75)
-                .Font.Bold = True
-            End With
-        ElseIf Len(cellVal) = 0 Then
-            ' Empty spacer row
-            ws.Range(ws.Cells(rowNum, StartCell.Column), ws.Cells(rowNum, StartCell.Column + ColCount - 1)).Interior.Color = RGB(250, 250, 250)
-            ws.Rows(rowNum).RowHeight = 8
-        Else
-            ws.Cells(rowNum, StartCell.Column).Font.Bold = False
-            ws.Cells(rowNum, StartCell.Column).HorizontalAlignment = xlLeft
-        End If
-    Next r
-    
-    ' Center align day columns
-    ws.Range(ws.Cells(StartCell.Row + 1, StartCell.Column + 1), _
-             ws.Cells(StartCell.Row + RowCount - 1, StartCell.Column + ColCount - 1)).HorizontalAlignment = xlCenter
-    
-    ' Column Widths
-    ws.Columns(StartCell.Column).ColumnWidth = 26
-    ws.Range(ws.Columns(StartCell.Column + 1), ws.Columns(StartCell.Column + ColCount - 1)).ColumnWidth = 5.5
+Public Sub FormatMatrixLayout(ByVal StartCell As Range, ByVal dfMatrix As cDataFrame)
+    Dim styler As New cTableStyler
+    styler.Attach(StartCell, dfMatrix, HasHeaders:=True) _
+          .ApplyTheme("NAVY") _
+          .SetFont("Segoe UI", DataSize:=9.5, HeaderSize:=10#) _
+          .SetHeaderRowHeight(28#) _
+          .SetDataRowHeight(20#) _
+          .SetSectionRowHeight("Name", "[ TEAM: * ]", Height:=24#, Bold:=True, _
+                               BgColor:=RGB(225, 235, 245), FontColor:=RGB(20, 45, 75)) _
+          .SetColumnWidth("Name", 24#) _
+          .SetUniformColumnWidth("[0-9]*", Padding:=1.2#, MinWidth:=5.5) _
+          .AlignColumn("[0-9]*", -4108) _
+          .ApplyBorders()
 End Sub
 
-Private Sub ApplyStatusFormatting(ByVal StartCell As Range)
+Public Sub ApplyStatusFormatting(ByVal StartCell As Range)
     Dim ws As Worksheet
     Dim lastRow As Long, lastCol As Long
-    Dim dataRange As Range
-    Dim cell As Range
-    Dim valStr As String
+    Dim matrixRange As Range
+    Dim dfMatrix As New cDataFrame
     
     Set ws = StartCell.Worksheet
     lastRow = ws.Cells(ws.Rows.Count, StartCell.Column).End(xlUp).Row
@@ -299,30 +283,13 @@ Private Sub ApplyStatusFormatting(ByVal StartCell As Range)
     
     If lastRow <= StartCell.Row Or lastCol <= StartCell.Column Then Exit Sub
     
-    Set dataRange = ws.Range(ws.Cells(StartCell.Row + 1, StartCell.Column + 1), ws.Cells(lastRow, lastCol))
+    Set matrixRange = ws.Range(StartCell, ws.Cells(lastRow, lastCol))
+    dfMatrix.LoadFromRange matrixRange
     
-    For Each cell In dataRange
-        valStr = UCase$(Trim$(CStr(cell.Value)))
-        If Len(valStr) > 0 Then
-            If InStr(1, valStr, "LEAVE") > 0 Then
-                cell.Interior.Color = RGB(255, 224, 224) ' Light Coral / Red
-                cell.Font.Color = RGB(153, 27, 27)
-                cell.Font.Bold = True
-            ElseIf InStr(1, valStr, "WFH") > 0 Then
-                cell.Interior.Color = RGB(224, 242, 254) ' Light Sky Blue
-                cell.Font.Color = RGB(3, 105, 161)
-                cell.Font.Bold = True
-            ElseIf InStr(1, valStr, "OT") > 0 Then
-                cell.Interior.Color = RGB(243, 232, 255) ' Light Purple
-                cell.Font.Color = RGB(107, 33, 168)
-                cell.Font.Bold = True
-            ElseIf InStr(1, valStr, "OFF") > 0 Then
-                cell.Interior.Color = RGB(241, 245, 249) ' Slate Gray
-                cell.Font.Color = RGB(71, 85, 105)
-            Else
-                cell.Interior.Color = RGB(220, 252, 231) ' Light Green
-                cell.Font.Color = RGB(22, 101, 52)
-            End If
-        End If
-    Next cell
+    Dim styler As New cTableStyler
+    styler.Attach(StartCell, dfMatrix, HasHeaders:=True) _
+          .HighlightValues("[0-9]*", "LEAVE", RGB(255, 224, 224), RGB(153, 27, 27), Bold:=True) _
+          .HighlightValues("[0-9]*", "WFH", RGB(224, 242, 254), RGB(3, 105, 161), Bold:=True) _
+          .HighlightValues("[0-9]*", "OT", RGB(243, 232, 255), RGB(107, 33, 168), Bold:=True) _
+          .HighlightValues("[0-9]*", "OFF", RGB(241, 245, 249), RGB(71, 85, 105))
 End Sub

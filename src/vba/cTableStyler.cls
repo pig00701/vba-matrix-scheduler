@@ -17,7 +17,8 @@ Option Explicit
 '              application, vectorized column number formatting, multi-column
 '              formatting, batch-union zebra striping, total row highlighting,
 '              flexible row/column sizing (uniform group widths, wildcard pattern
-'              matching, section row height control), and screen updating management.
+'              matching, section row height control), conditional status highlighting,
+'              freeze panes, typography/font control, and screen updating management.
 ' Author: Korn (AI Backend Developer, Technodevmoo)
 ' Architecture: Kit (Tech Lead)
 ' ==============================================================================
@@ -452,7 +453,8 @@ Public Function AutoFitColumns(Optional ByVal Padding As Double = 3#) As cTableS
         Exit Function
     End If
 
-    mTableRange.Columns.AutoFit
+    On Error Resume Next
+    mTableRange.EntireColumn.AutoFit
 
     If Padding > 0# Then
         Dim c As Long
@@ -460,6 +462,7 @@ Public Function AutoFitColumns(Optional ByVal Padding As Double = 3#) As cTableS
             mTableRange.Columns(c).ColumnWidth = mTableRange.Columns(c).ColumnWidth + Padding
         Next c
     End If
+    On Error GoTo 0
 
     Set AutoFitColumns = Me
 End Function
@@ -467,7 +470,9 @@ End Function
 ' Auto-fits row heights across the table (useful after text wrapping).
 Public Function AutoFitRows() As cTableStyler
     If Not mTableRange Is Nothing Then
-        mTableRange.Rows.AutoFit
+        On Error Resume Next
+        mTableRange.EntireRow.AutoFit
+        On Error GoTo 0
     End If
     Set AutoFitRows = Me
 End Function
@@ -517,15 +522,17 @@ Public Function SetUniformColumnWidth(ByVal ColumnKeyOrPattern As Variant, _
     Dim maxW As Double
     maxW = MinWidth
 
+    On Error Resume Next
     For i = LBound(colIndices) To UBound(colIndices)
         colIdx = colIndices(i)
         If colIdx >= 1 And colIdx <= mColumnCount Then
-            mTableRange.Columns(colIdx).AutoFit
+            mTableRange.Columns(colIdx).EntireColumn.AutoFit
             Dim curW As Double
             curW = mTableRange.Columns(colIdx).ColumnWidth
             If curW > maxW Then maxW = curW
         End If
     Next i
+    On Error GoTo 0
 
     ' 2. Apply uniform width across the entire group
     Dim targetW As Double
@@ -644,6 +651,117 @@ Public Function SetWrapText(ByVal ColumnKeyOrPattern As Variant, Optional ByVal 
     End If
 
     Set SetWrapText = Me
+End Function
+
+' Sets WrapText on the header row to allow multi-line column titles.
+Public Function SetHeaderWrapText(Optional ByVal Wrap As Boolean = True) As cTableStyler
+    If Not mHeaderRange Is Nothing Then
+        mHeaderRange.WrapText = Wrap
+    End If
+    Set SetHeaderWrapText = Me
+End Function
+
+' ------------------------------------------------------------------------------
+' Conditional Status Highlighting, Freeze Panes & Typography
+' ------------------------------------------------------------------------------
+
+' Applies conditional formatting rule on specified column(s) matching a status or KPI value.
+' Supports exact text/numeric comparison. ColumnKeyOrPattern can be name, index, array, or wildcard ("Day *").
+Public Function HighlightValues(ByVal ColumnKeyOrPattern As Variant, _
+                                ByVal ValueToMatch As Variant, _
+                                ByVal BgColor As Long, _
+                                Optional ByVal FontColor As Long = -1, _
+                                Optional ByVal Bold As Boolean = False) As cTableStyler
+    If mDataBodyRange Is Nothing Or mRowCount = 0 Then
+        Set HighlightValues = Me
+        Exit Function
+    End If
+
+    Dim colIndices() As Long
+    colIndices = ResolveColIndices(ColumnKeyOrPattern)
+    If UBound(colIndices) < LBound(colIndices) Then
+        Set HighlightValues = Me
+        Exit Function
+    End If
+
+    Const xlCellValue As Long = 1
+    Const xlEqual As Long = 3
+
+    Dim formulaStr As String
+    If VarType(ValueToMatch) = vbString Then
+        formulaStr = Chr$(34) & CStr(ValueToMatch) & Chr$(34)
+    Else
+        formulaStr = CStr(ValueToMatch)
+    End If
+
+    Dim i As Long, colIdx As Long
+    For i = LBound(colIndices) To UBound(colIndices)
+        colIdx = colIndices(i)
+        If colIdx >= 1 And colIdx <= mColumnCount Then
+            Dim colRng As Object
+            Set colRng = mDataBodyRange.Columns(colIdx)
+
+            Dim fc As Object
+            Set fc = colRng.FormatConditions.Add(Type:=xlCellValue, Operator:=xlEqual, Formula1:=formulaStr)
+            fc.Interior.Color = BgColor
+            If FontColor >= 0 Then fc.Font.Color = FontColor
+            If Bold Then fc.Font.Bold = True
+        End If
+    Next i
+
+    Set HighlightValues = Me
+End Function
+
+' Freezes worksheet panes at the boundary of the table (header row and leading columns).
+Public Function FreezePanes(Optional ByVal FreezeRows As Long = 1, _
+                            Optional ByVal FreezeCols As Long = 0) As cTableStyler
+    If mTopLeftCell Is Nothing Then
+        Set FreezePanes = Me
+        Exit Function
+    End If
+
+    On Error Resume Next
+    Dim appObj As Object
+    Set appObj = mWorksheet.Application
+    mWorksheet.Activate
+    appObj.ActiveWindow.FreezePanes = False
+
+    Dim splitRow As Long, splitCol As Long
+    splitRow = mTopLeftCell.Row + FreezeRows
+    splitCol = mTopLeftCell.Column + FreezeCols
+
+    mWorksheet.Cells(splitRow, splitCol).Select
+    appObj.ActiveWindow.FreezePanes = True
+    On Error GoTo 0
+
+    Set FreezePanes = Me
+End Function
+
+' Sets font name and sizes across the entire table, data body, and header row.
+Public Function SetFont(Optional ByVal FontName As String = "Segoe UI", _
+                        Optional ByVal DataSize As Double = 10#, _
+                        Optional ByVal HeaderSize As Double = 11#) As cTableStyler
+    If Not mTableRange Is Nothing And Len(Trim$(FontName)) > 0 Then
+        mTableRange.Font.Name = FontName
+    End If
+    If Not mDataBodyRange Is Nothing And DataSize > 0# Then
+        mDataBodyRange.Font.Size = DataSize
+    End If
+    If Not mHeaderRange Is Nothing And HeaderSize > 0# Then
+        mHeaderRange.Font.Size = HeaderSize
+    End If
+    Set SetFont = Me
+End Function
+
+' Toggles worksheet gridlines visibility.
+Public Function SetGridlines(Optional ByVal Visible As Boolean = True) As cTableStyler
+    If Not mWorksheet Is Nothing Then
+        On Error Resume Next
+        mWorksheet.Activate
+        mWorksheet.Application.ActiveWindow.DisplayGridlines = Visible
+        On Error GoTo 0
+    End If
+    Set SetGridlines = Me
 End Function
 
 ' ------------------------------------------------------------------------------
