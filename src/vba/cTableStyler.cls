@@ -11,12 +11,13 @@ Option Explicit
 
 ' ==============================================================================
 ' Class: cTableStyler
-' Description: Fluent Excel Cell & Range Styling Engine for cDataFrame.
+' Description: High-Performance Fluent Excel Cell & Range Styling Engine for cDataFrame.
 '              Decouples presentation/formatting concerns from the core in-memory
 '              data structure. Provides single-COM-call header theming, border
 '              application, vectorized column number formatting, multi-column
 '              formatting, batch-union zebra striping, total row highlighting,
-'              auto-fitting with custom padding, and screen updating management.
+'              flexible row/column sizing (uniform group widths, wildcard pattern
+'              matching, section row height control), and screen updating management.
 ' Author: Korn (AI Backend Developer, Technodevmoo)
 ' Architecture: Kit (Tech Lead)
 ' ==============================================================================
@@ -261,7 +262,7 @@ Public Function ApplyTheme(Optional ByVal ThemeName As String = "NAVY", _
     Set ApplyTheme = Me
 End Function
 
-' Sets NumberFormat on data cells for a given column (or 1D array of columns) in a single COM call.
+' Sets NumberFormat on data cells for a given column (or 1D array/pattern of columns) in a single COM call.
 Public Function FormatColumn(ByVal ColumnKey As Variant, ByVal NumberFormatString As String) As cTableStyler
     If mDataBodyRange Is Nothing Or mRowCount = 0 Then
         Set FormatColumn = Me
@@ -274,61 +275,68 @@ Public Function FormatColumn(ByVal ColumnKey As Variant, ByVal NumberFormatStrin
         Exit Function
     End If
 
-    Dim colIdx As Long
-    colIdx = ResolveColIndex(ColumnKey)
-    If colIdx < 1 Or colIdx > mColumnCount Then
-        Err.Raise 9, "cTableStyler.FormatColumn", "Column index out of range: " & CStr(ColumnKey)
+    Dim colIndices() As Long
+    colIndices = ResolveColIndices(ColumnKey)
+    If UBound(colIndices) >= LBound(colIndices) Then
+        Dim i As Long
+        For i = LBound(colIndices) To UBound(colIndices)
+            Dim colIdx As Long
+            colIdx = colIndices(i)
+            If colIdx >= 1 And colIdx <= mColumnCount Then
+                mDataBodyRange.Columns(colIdx).NumberFormat = NumberFormatString
+            End If
+        Next i
     End If
-
-    mDataBodyRange.Columns(colIdx).NumberFormat = NumberFormatString
 
     Set FormatColumn = Me
 End Function
 
-' Sets NumberFormat on data cells for multiple columns (array or comma-delimited string).
+' Sets NumberFormat on data cells for multiple columns (array, comma-delimited string, or wildcard).
 Public Function FormatColumns(ByVal ColumnKeys As Variant, ByVal NumberFormatString As String) As cTableStyler
     If mDataBodyRange Is Nothing Or mRowCount = 0 Then
         Set FormatColumns = Me
         Exit Function
     End If
 
-    If IsArray(ColumnKeys) Then
+    Dim colIndices() As Long
+    colIndices = ResolveColIndices(ColumnKeys)
+    If UBound(colIndices) >= LBound(colIndices) Then
         Dim i As Long
-        For i = LBound(ColumnKeys) To UBound(ColumnKeys)
-            FormatColumn ColumnKeys(i), NumberFormatString
+        For i = LBound(colIndices) To UBound(colIndices)
+            Dim colIdx As Long
+            colIdx = colIndices(i)
+            If colIdx >= 1 And colIdx <= mColumnCount Then
+                mDataBodyRange.Columns(colIdx).NumberFormat = NumberFormatString
+            End If
         Next i
-    ElseIf VarType(ColumnKeys) = vbString And InStr(CStr(ColumnKeys), ",") > 0 Then
-        Dim parts() As String
-        parts = Split(CStr(ColumnKeys), ",")
-        Dim p As Long
-        For p = LBound(parts) To UBound(parts)
-            FormatColumn Trim$(parts(p)), NumberFormatString
-        Next p
-    Else
-        FormatColumn ColumnKeys, NumberFormatString
     End If
 
     Set FormatColumns = Me
 End Function
 
-' Sets HorizontalAlignment on data cells (or entire column including header) for a given column.
-Public Function AlignColumn(ByVal ColumnKey As Variant, ByVal Alignment As Long, _
+' Sets HorizontalAlignment on data cells (or entire column including header) for a given column or group.
+Public Function AlignColumn(ByVal ColumnKeyOrPattern As Variant, ByVal Alignment As Long, _
                             Optional ByVal IncludeHeader As Boolean = False) As cTableStyler
     If mTableRange Is Nothing Then
         Set AlignColumn = Me
         Exit Function
     End If
 
-    Dim colIdx As Long
-    colIdx = ResolveColIndex(ColumnKey)
-    If colIdx < 1 Or colIdx > mColumnCount Then
-        Err.Raise 9, "cTableStyler.AlignColumn", "Column index out of range: " & CStr(ColumnKey)
-    End If
-
-    If IncludeHeader Then
-        mTableRange.Columns(colIdx).HorizontalAlignment = Alignment
-    ElseIf Not mDataBodyRange Is Nothing Then
-        mDataBodyRange.Columns(colIdx).HorizontalAlignment = Alignment
+    Dim colIndices() As Long
+    colIndices = ResolveColIndices(ColumnKeyOrPattern)
+    If UBound(colIndices) >= LBound(colIndices) Then
+        Dim i As Long
+        For i = LBound(colIndices) To UBound(colIndices)
+            Dim colIdx As Long
+            colIdx = colIndices(i)
+            If colIdx >= 1 And colIdx <= mColumnCount Then
+                If IncludeHeader Then
+                    mTableRange.Columns(colIdx).HorizontalAlignment = Alignment
+                ElseIf Not mDataBodyRange Is Nothing Then
+                    mDataBodyRange.Columns(colIdx).HorizontalAlignment = Alignment
+                End If
+            End If
+        Next i
     End If
 
     Set AlignColumn = Me
@@ -433,6 +441,10 @@ Public Function HighlightTotalRow(Optional ByVal TopBorder As Boolean = True, _
     Set HighlightTotalRow = Me
 End Function
 
+' ------------------------------------------------------------------------------
+' Flexible Row & Column Sizing Methods
+' ------------------------------------------------------------------------------
+
 ' Auto-fits all table columns and applies extra width padding.
 Public Function AutoFitColumns(Optional ByVal Padding As Double = 3#) As cTableStyler
     If mTableRange Is Nothing Then
@@ -450,6 +462,188 @@ Public Function AutoFitColumns(Optional ByVal Padding As Double = 3#) As cTableS
     End If
 
     Set AutoFitColumns = Me
+End Function
+
+' Auto-fits row heights across the table (useful after text wrapping).
+Public Function AutoFitRows() As cTableStyler
+    If Not mTableRange Is Nothing Then
+        mTableRange.Rows.AutoFit
+    End If
+    Set AutoFitRows = Me
+End Function
+
+' Sets ColumnWidth for specific columns by name, 1-based index, array, comma-list, or wildcard pattern ("Day *").
+Public Function SetColumnWidth(ByVal ColumnKeyOrPattern As Variant, ByVal Width As Double) As cTableStyler
+    If mTableRange Is Nothing Or Width <= 0# Then
+        Set SetColumnWidth = Me
+        Exit Function
+    End If
+
+    Dim colIndices() As Long
+    colIndices = ResolveColIndices(ColumnKeyOrPattern)
+    If UBound(colIndices) >= LBound(colIndices) Then
+        Dim i As Long
+        For i = LBound(colIndices) To UBound(colIndices)
+            Dim colIdx As Long
+            colIdx = colIndices(i)
+            If colIdx >= 1 And colIdx <= mColumnCount Then
+                mTableRange.Columns(colIdx).ColumnWidth = Width
+            End If
+        Next i
+    End If
+
+    Set SetColumnWidth = Me
+End Function
+
+' Auto-fits columns in a matching group (e.g. "Day *", Array(...)), measures the maximum width,
+' and sets ALL columns in that group to that exact same uniform width (+ optional padding).
+Public Function SetUniformColumnWidth(ByVal ColumnKeyOrPattern As Variant, _
+                                     Optional ByVal Padding As Double = 1.5#, _
+                                     Optional ByVal MinWidth As Double = 0#) As cTableStyler
+    If mTableRange Is Nothing Then
+        Set SetUniformColumnWidth = Me
+        Exit Function
+    End If
+
+    Dim colIndices() As Long
+    colIndices = ResolveColIndices(ColumnKeyOrPattern)
+    If UBound(colIndices) < LBound(colIndices) Then
+        Set SetUniformColumnWidth = Me
+        Exit Function
+    End If
+
+    ' 1. AutoFit only the columns in this group to calculate natural content widths
+    Dim i As Long, colIdx As Long
+    Dim maxW As Double
+    maxW = MinWidth
+
+    For i = LBound(colIndices) To UBound(colIndices)
+        colIdx = colIndices(i)
+        If colIdx >= 1 And colIdx <= mColumnCount Then
+            mTableRange.Columns(colIdx).AutoFit
+            Dim curW As Double
+            curW = mTableRange.Columns(colIdx).ColumnWidth
+            If curW > maxW Then maxW = curW
+        End If
+    Next i
+
+    ' 2. Apply uniform width across the entire group
+    Dim targetW As Double
+    targetW = maxW + Padding
+    For i = LBound(colIndices) To UBound(colIndices)
+        colIdx = colIndices(i)
+        If colIdx >= 1 And colIdx <= mColumnCount Then
+            mTableRange.Columns(colIdx).ColumnWidth = targetW
+        End If
+    Next i
+
+    Set SetUniformColumnWidth = Me
+End Function
+
+' Sets a uniform column width across all columns in the table in 1 COM call.
+Public Function SetAllColumnWidths(ByVal Width As Double) As cTableStyler
+    If Not mTableRange Is Nothing And Width > 0# Then
+        mTableRange.Columns.ColumnWidth = Width
+    End If
+    Set SetAllColumnWidths = Me
+End Function
+
+' Sets row height specifically on the header row in 1 COM call.
+Public Function SetHeaderRowHeight(ByVal Height As Double) As cTableStyler
+    If Not mHeaderRange Is Nothing And Height > 0# Then
+        mHeaderRange.RowHeight = Height
+    End If
+    Set SetHeaderRowHeight = Me
+End Function
+
+' Sets row height uniformly across all data rows (employee records) in 1 COM call.
+Public Function SetDataRowHeight(ByVal Height As Double) As cTableStyler
+    If Not mDataBodyRange Is Nothing And Height > 0# Then
+        mDataBodyRange.RowHeight = Height
+    End If
+    Set SetDataRowHeight = Me
+End Function
+
+' Identifies section divider rows in a column by pattern (e.g. "[ TEAM: * ]" or "[ * ]")
+' and sets their row height and optional styling (e.g. larger height or background for section dividers).
+Public Function SetSectionRowHeight(ByVal ColumnKey As Variant, _
+                                    ByVal MatchPattern As String, _
+                                    ByVal Height As Double, _
+                                    Optional ByVal Bold As Boolean = True, _
+                                    Optional ByVal BgColor As Long = -1, _
+                                    Optional ByVal FontColor As Long = -1) As cTableStyler
+    If mDataBodyRange Is Nothing Or mRowCount = 0 Or Height <= 0# Then
+        Set SetSectionRowHeight = Me
+        Exit Function
+    End If
+
+    Dim colIdx As Long
+    colIdx = ResolveColIndex(ColumnKey)
+    If colIdx < 1 Or colIdx > mColumnCount Then
+        Err.Raise 9, "cTableStyler.SetSectionRowHeight", "Column index out of range: " & CStr(ColumnKey)
+    End If
+
+    ' Read entire column values in 1 COM call
+    Dim colVals As Variant
+    colVals = mDataBodyRange.Columns(colIdx).Value2
+
+    Dim r As Long, rowText As String
+    For r = 1 To mRowCount
+        If mRowCount = 1 Then
+            rowText = CStr(colVals)
+        Else
+            rowText = CStr(colVals(r, 1))
+        End If
+
+        Dim isMatch As Boolean
+        isMatch = (rowText Like MatchPattern)
+        If Not isMatch And (InStr(MatchPattern, "[") > 0 Or InStr(MatchPattern, "]") > 0) Then
+            Dim safePat As String
+            safePat = Replace(MatchPattern, "[", Chr$(1))
+            safePat = Replace(safePat, "]", "[]]")
+            safePat = Replace(safePat, Chr$(1), "[[]")
+            isMatch = (rowText Like safePat)
+        End If
+        If Not isMatch And InStr(MatchPattern, "*") = 0 And InStr(MatchPattern, "?") = 0 Then
+            isMatch = (InStr(1, rowText, MatchPattern, vbTextCompare) > 0)
+        End If
+
+        If isMatch Then
+            Dim rowRng As Object
+            Set rowRng = mDataBodyRange.Rows(r)
+            rowRng.RowHeight = Height
+            If Bold Then rowRng.Font.Bold = True
+            If BgColor >= 0 Then rowRng.Interior.Color = BgColor
+            If FontColor >= 0 Then rowRng.Font.Color = FontColor
+        End If
+    Next r
+
+    Set SetSectionRowHeight = Me
+End Function
+
+' Sets WrapText property for specific columns (array, pattern, or single column).
+Public Function SetWrapText(ByVal ColumnKeyOrPattern As Variant, Optional ByVal Wrap As Boolean = True) As cTableStyler
+    If mTableRange Is Nothing Then
+        Set SetWrapText = Me
+        Exit Function
+    End If
+
+    Dim colIndices() As Long
+    colIndices = ResolveColIndices(ColumnKeyOrPattern)
+    If UBound(colIndices) >= LBound(colIndices) Then
+        Dim i As Long
+        For i = LBound(colIndices) To UBound(colIndices)
+            Dim colIdx As Long
+            colIdx = colIndices(i)
+            If colIdx >= 1 And colIdx <= mColumnCount Then
+                If Not mDataBodyRange Is Nothing Then
+                    mDataBodyRange.Columns(colIdx).WrapText = Wrap
+                End If
+            End If
+        Next i
+    End If
+
+    Set SetWrapText = Me
 End Function
 
 ' ------------------------------------------------------------------------------
@@ -472,4 +666,65 @@ Private Function ResolveColIndex(ByVal ColumnKey As Variant) As Long
             Err.Raise 5, "cTableStyler", "Column '" & CStr(ColumnKey) & "' not found in table."
         End If
     End If
+End Function
+
+Private Function ResolveColIndices(ByVal ColumnKeyOrPattern As Variant) As Long()
+    Dim result() As Long
+    Dim count As Long
+    count = 0
+
+    If IsArray(ColumnKeyOrPattern) Then
+        Dim i As Long
+        For i = LBound(ColumnKeyOrPattern) To UBound(ColumnKeyOrPattern)
+            Dim subIndices() As Long
+            subIndices = ResolveColIndices(ColumnKeyOrPattern(i))
+            Dim s As Long
+            For s = LBound(subIndices) To UBound(subIndices)
+                count = count + 1
+                ReDim Preserve result(1 To count)
+                result(count) = subIndices(s)
+            Next s
+        Next i
+    ElseIf VarType(ColumnKeyOrPattern) = vbString Then
+        Dim patternStr As String
+        patternStr = CStr(ColumnKeyOrPattern)
+        If InStr(patternStr, ",") > 0 Then
+            Dim parts() As String
+            parts = Split(patternStr, ",")
+            Dim p As Long
+            For p = LBound(parts) To UBound(parts)
+                Dim pIndices() As Long
+                pIndices = ResolveColIndices(Trim$(parts(p)))
+                For s = LBound(pIndices) To UBound(pIndices)
+                    count = count + 1
+                    ReDim Preserve result(1 To count)
+                    result(count) = pIndices(s)
+                Next s
+            Next p
+        ElseIf InStr(patternStr, "*") > 0 Or InStr(patternStr, "?") > 0 Then
+            ' Wildcard pattern matching against all column names in mColIndexMap
+            Dim colKey As Variant
+            For Each colKey In mColIndexMap.Keys
+                If CStr(colKey) Like patternStr Then
+                    count = count + 1
+                    ReDim Preserve result(1 To count)
+                    result(count) = mColIndexMap.Item(colKey)
+                End If
+            Next colKey
+        Else
+            ' Exact column name
+            count = 1
+            ReDim result(1 To 1)
+            result(1) = ResolveColIndex(patternStr)
+        End If
+    ElseIf IsNumeric(ColumnKeyOrPattern) Then
+        count = 1
+        ReDim result(1 To 1)
+        result(1) = CLng(ColumnKeyOrPattern)
+    End If
+
+    If count = 0 Then
+        ReDim result(0 To -1) ' Empty array
+    End If
+    ResolveColIndices = result
 End Function
