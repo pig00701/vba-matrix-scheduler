@@ -120,7 +120,7 @@ try:
     btn4.OnAction = "Btn_ClearMatrix"
 
     print("2. Importing VBA modules...", flush=True)
-    for mod_file in ["cColumn.cls", "cDataFrame.cls", "cTableStyler.cls", "mMatrixScheduler.bas"]:
+    for mod_file in ["cColumn.cls", "cDataFrame.cls", "cTableStyler.cls", "cDataValidator.cls", "cReportBuilder.cls", "mMatrixScheduler.bas"]:
         mod_path = os.path.join(vba_dir, mod_file)
         wb.VBProject.VBComponents.Import(mod_path)
         print(f"   Imported {mod_file}", flush=True)
