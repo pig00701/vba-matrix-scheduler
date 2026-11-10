@@ -32,6 +32,8 @@ Option Explicit
 Private Const XL_CENTER As Long = -4108
 Private Const XL_LEFT As Long = -4131
 Private Const XL_EDGE_LEFT As Long = 7
+Private Const XL_EDGE_TOP As Long = 8
+Private Const XL_EDGE_BOTTOM As Long = 9
 Private Const XL_EDGE_RIGHT As Long = 10
 Private Const XL_CONTINUOUS As Long = 1
 Private Const XL_THIN As Long = 2
@@ -54,6 +56,10 @@ Private mMaxCol As Long
 Private mInitialTopLeft As Object
 Private mWarnings As Collection
 
+' Rollback snapshot state
+Private mSnapshotRow As Long
+Private mSnapshotMaxCol As Long
+
 ' Environment guard state (RAII, restored in EndUpdate / Class_Terminate)
 Private mInBatch As Boolean
 Private mPrevScreenUpdating As Boolean
@@ -66,6 +72,8 @@ Private Sub Class_Initialize()
     mStartCol = 2
     mCurrentRow = 2
     mMaxCol = 2
+    mSnapshotRow = 2
+    mSnapshotMaxCol = 2
     mInBatch = False
     mPrevScreenUpdating = True
     mPrevCalculation = -4105 ' xlCalculationAutomatic
@@ -115,20 +123,26 @@ Public Function Attach(ByVal TargetWorksheet As Object, _
     mStartCol = anchor.Column
     mCurrentRow = mStartRow
     mMaxCol = mStartCol
+    mSnapshotRow = mStartRow
+    mSnapshotMaxCol = mStartCol
     Set mWarnings = New Collection
 
     Set Attach = Me
 End Function
 
 ' ------------------------------------------------------------------------------
-' Environment Guard (crash-safe)
+' Environment Guard & Rollback (crash-safe)
 ' ------------------------------------------------------------------------------
 
 ' Suppresses screen updates, events and automatic calculation while the report is built.
+' Also snapshots the current row/col position for atomic Rollback support.
 ' Class_Terminate automatically calls EndUpdate, so Excel is never left in a frozen state.
 Public Function BeginUpdate() As cReportBuilder
     CheckAttached "BeginUpdate"
     If Not mInBatch Then
+        mSnapshotRow = mCurrentRow
+        mSnapshotMaxCol = mMaxCol
+
         Dim appObj As Object
         On Error Resume Next
         Set appObj = mWorksheet.Application
@@ -160,6 +174,32 @@ Public Function EndUpdate() As cReportBuilder
         On Error GoTo 0
     End If
     Set EndUpdate = Me
+End Function
+
+' Discards all cells written since BeginUpdate (or Attach), clears formats/contents,
+' resets CurrentRow back to snapshot, and safely restores application state.
+Public Function Rollback() As cReportBuilder
+    CheckAttached "Rollback"
+    If mSnapshotRow > 0 And Not mWorksheet Is Nothing Then
+        Dim lastR As Long, lastC As Long
+        lastR = mCurrentRow
+        lastC = mMaxCol
+        If lastR >= mSnapshotRow And lastC >= mStartCol Then
+            Dim dirtyRng As Object
+            On Error Resume Next
+            Set dirtyRng = mWorksheet.Range(mWorksheet.Cells(mSnapshotRow, mStartCol), mWorksheet.Cells(lastR, lastC))
+            If Not dirtyRng Is Nothing Then
+                dirtyRng.UnMerge
+                dirtyRng.Clear
+            End If
+            On Error GoTo 0
+        End If
+        mCurrentRow = mSnapshotRow
+        mMaxCol = mSnapshotMaxCol
+    End If
+    If mInBatch Then EndUpdate
+    AddWarning "Rollback: changes discarded and worksheet restored to snapshot."
+    Set Rollback = Me
 End Function
 
 ' ------------------------------------------------------------------------------
@@ -251,13 +291,14 @@ Public Function AddKpiRow(ByVal Titles As Variant, _
                           Optional ByVal Subtexts As Variant, _
                           Optional ByVal CardWidthCols As Long = 2, _
                           Optional ByVal NumberFormats As Variant, _
-                          Optional ByVal UseMerge As Boolean = False) As cReportBuilder
+                          Optional ByVal UseMerge As Boolean = False, _
+                          Optional ByVal IsFormula As Variant) As cReportBuilder
     CheckAttached "AddKpiRow"
     If CardWidthCols < 1 Then
         Err.Raise 5, SRC & ".AddKpiRow", "CardWidthCols must be >= 1 (got " & CardWidthCols & ")."
     End If
 
-    Dim titleArr As Variant, valueArr As Variant, subArr As Variant, fmtArr As Variant
+    Dim titleArr As Variant, valueArr As Variant, subArr As Variant, fmtArr As Variant, formArr As Variant
     titleArr = AsArray(Titles)
     valueArr = AsArray(Values)
 
@@ -293,6 +334,15 @@ Public Function AddKpiRow(ByVal Titles As Variant, _
         End If
     End If
 
+    Dim hasFormArr As Boolean
+    hasFormArr = False
+    If Not IsMissing(IsFormula) Then
+        If Not IsEmpty(IsFormula) Then
+            formArr = AsArray(IsFormula)
+            hasFormArr = True
+        End If
+    End If
+
     Dim cardTop As Long, cardBottom As Long, lastCol As Long
     cardTop = mCurrentRow
     cardBottom = cardTop + IIf(hasSub, 2, 1)
@@ -303,14 +353,15 @@ Public Function AddKpiRow(ByVal Titles As Variant, _
     If lastCol > mMaxCol Then mMaxCol = lastCol
 
     Dim curC As Long, cardEndC As Long, k As Long, b As Long
-    Dim lbT As Long, lbV As Long, lbS As Long, lbF As Long
+    Dim lbT As Long, lbV As Long, lbS As Long, lbF As Long, lbForm As Long
     lbT = LBound(titleArr)
     lbV = LBound(valueArr)
     If hasSub Then lbS = LBound(subArr)
     If hasNumFmt Then lbF = LBound(fmtArr)
+    If hasFormArr Then lbForm = LBound(formArr)
 
     Dim tRng As Object, vRng As Object, sRng As Object, fullCardRng As Object
-    Dim subText As String, fmtStr As String
+    Dim subText As String, fmtStr As String, cardIsForm As Boolean, fStr As String
 
     curC = mStartCol
     For k = 0 To numCards - 1
@@ -346,7 +397,21 @@ Public Function AddKpiRow(ByVal Titles As Variant, _
                 If Len(Trim$(fmtStr)) > 0 Then vRng.NumberFormat = fmtStr
             End If
         End If
-        PutValue vRng.Cells(1, 1), valueArr(lbV + k)
+
+        cardIsForm = False
+        If hasFormArr Then
+            If k <= (UBound(formArr) - lbForm) Then
+                cardIsForm = CBool(formArr(lbForm + k))
+            End If
+        End If
+
+        If cardIsForm Then
+            fStr = Trim$(CStr(valueArr(lbV + k)))
+            If Left$(fStr, 1) <> "=" Then fStr = "=" & fStr
+            vRng.Cells(1, 1).Formula = fStr
+        Else
+            PutValue vRng.Cells(1, 1), valueArr(lbV + k)
+        End If
         vRng.Font.Name = "Segoe UI"
         vRng.Font.Size = 16
         vRng.Font.Bold = True
@@ -488,6 +553,82 @@ Public Function AddTable(ByVal Df As cDataFrame, _
     Set AddTable = Me
 End Function
 
+' Renders a clean data contract / quality assurance summary badge from a cDataValidator instance.
+' Highlights pass (emerald green) or fail (soft red alert) with row/error counts,
+' and optionally renders a full error breakdown table if rules were violated.
+Public Function AddValidationSummary(ByVal Validator As cDataValidator, _
+                                     Optional ByVal WidthColumns As Long = 0, _
+                                     Optional ByVal ShowErrorsTable As Boolean = False) As cReportBuilder
+    CheckAttached "AddValidationSummary"
+    If Validator Is Nothing Then
+        Err.Raise 91, SRC & ".AddValidationSummary", "Validator cannot be Nothing."
+    End If
+
+    If WidthColumns <= 0 Then
+        If mMaxCol > mStartCol Then
+            WidthColumns = mMaxCol - mStartCol + 1
+        Else
+            WidthColumns = 8
+        End If
+    End If
+
+    Dim endCol As Long
+    endCol = mStartCol + WidthColumns - 1
+    RequireColumns endCol, "AddValidationSummary"
+    RequireRows mCurrentRow + 1, "AddValidationSummary"
+
+    If endCol > mMaxCol Then mMaxCol = endCol
+
+    Dim boxRng As Object
+    Set boxRng = mWorksheet.Range(mWorksheet.Cells(mCurrentRow, mStartCol), mWorksheet.Cells(mCurrentRow, endCol))
+
+    Dim summaryMsg As String, bgColor As Long, borderColor As Long, fontColor As Long
+    If Validator.IsValid Then
+        summaryMsg = "DATA CONTRACT PASS: All " & Validator.TotalRowsChecked & _
+                     " rows verified against schema. 0 errors detected."
+        bgColor = RGB(240, 253, 244)      ' Emerald 50
+        borderColor = RGB(34, 197, 94)    ' Emerald 500
+        fontColor = RGB(22, 101, 52)      ' Emerald 800
+    Else
+        summaryMsg = "DATA CONTRACT ALERT: " & Validator.FailedRowsCount & " of " & _
+                     Validator.TotalRowsChecked & " rows failed validation (" & _
+                     Validator.ErrorCount & " errors detected)."
+        bgColor = RGB(254, 242, 242)      ' Red 50
+        borderColor = RGB(239, 68, 68)    ' Red 500
+        fontColor = RGB(153, 27, 27)      ' Red 800
+        AddWarning summaryMsg
+    End If
+
+    boxRng.HorizontalAlignment = 7 ' xlCenterAcrossSelection
+    PutValue boxRng.Cells(1, 1), summaryMsg
+    boxRng.Font.Name = "Segoe UI"
+    boxRng.Font.Size = 9.5
+    boxRng.Font.Bold = True
+    boxRng.Font.Color = fontColor
+    boxRng.Interior.Color = bgColor
+    boxRng.VerticalAlignment = XL_CENTER
+
+    Dim b As Long
+    For b = XL_EDGE_LEFT To XL_EDGE_RIGHT
+        boxRng.Borders(b).LineStyle = XL_CONTINUOUS
+        boxRng.Borders(b).Weight = XL_THIN
+        boxRng.Borders(b).Color = borderColor
+    Next b
+    mWorksheet.Rows(mCurrentRow).RowHeight = 24
+
+    mCurrentRow = mCurrentRow + 2 ' Gap
+
+    If ShowErrorsTable And Not Validator.IsValid Then
+        If Not Validator.Errors Is Nothing Then
+            If Validator.Errors.RowCount > 0 Then
+                AddTable Validator.Errors, Title:="Validation Error Details", StyleTheme:="Slate"
+            End If
+        End If
+    End If
+
+    Set AddValidationSummary = Me
+End Function
+
 ' Adds vertical blank spacing
 Public Function AddSpace(Optional ByVal Rows As Long = 2) As cReportBuilder
     CheckAttached "AddSpace"
@@ -515,6 +656,54 @@ Public Function AddNote(ByVal NoteText As String, _
     Set AddNote = Me
 End Function
 
+' Appends a standardized audit metadata footer with timestamp, author, source, and checksum.
+Public Function AddProvenanceFooter(Optional ByVal Author As String = "", _
+                                    Optional ByVal SourceDescription As String = "", _
+                                    Optional ByVal Checksum As String = "", _
+                                    Optional ByVal WidthColumns As Long = 0) As cReportBuilder
+    CheckAttached "AddProvenanceFooter"
+    If WidthColumns <= 0 Then
+        If mMaxCol > mStartCol Then
+            WidthColumns = mMaxCol - mStartCol + 1
+        Else
+            WidthColumns = 8
+        End If
+    End If
+
+    Dim endCol As Long
+    endCol = mStartCol + WidthColumns - 1
+    RequireColumns endCol, "AddProvenanceFooter"
+    RequireRows mCurrentRow, "AddProvenanceFooter"
+
+    If endCol > mMaxCol Then mMaxCol = endCol
+
+    Dim metaText As String
+    metaText = "Generated: " & Format$(Now, "yyyy-mm-dd hh:nn:ss")
+    If Len(Trim$(Author)) > 0 Then metaText = metaText & " | Author: " & SanitizeText(Author)
+    If Len(Trim$(SourceDescription)) > 0 Then metaText = metaText & " | Source: " & SanitizeText(SourceDescription)
+    If Len(Trim$(Checksum)) > 0 Then metaText = metaText & " | Checksum: " & SanitizeText(Checksum)
+
+    Dim footerRng As Object
+    Set footerRng = mWorksheet.Range(mWorksheet.Cells(mCurrentRow, mStartCol), mWorksheet.Cells(mCurrentRow, endCol))
+    footerRng.HorizontalAlignment = XL_LEFT
+    PutValue footerRng.Cells(1, 1), metaText
+    footerRng.Font.Name = "Segoe UI"
+    footerRng.Font.Size = 8
+    footerRng.Font.Italic = True
+    footerRng.Font.Color = RGB(148, 163, 184) ' Slate 400
+    mWorksheet.Rows(mCurrentRow).RowHeight = 16
+
+    ' Subtle thin top divider
+    With footerRng.Borders(XL_EDGE_TOP)
+        .LineStyle = XL_CONTINUOUS
+        .Weight = XL_THIN
+        .Color = RGB(226, 232, 240) ' Slate 200
+    End With
+
+    mCurrentRow = mCurrentRow + 1
+    Set AddProvenanceFooter = Me
+End Function
+
 ' Auto-fits all report columns within aesthetic min/max constraints
 Public Function AutoFitAll(Optional ByVal MinWidth As Double = 10, _
                            Optional ByVal MaxWidth As Double = 35) As cReportBuilder
@@ -537,6 +726,41 @@ Public Function AutoFitAll(Optional ByVal MinWidth As Double = 10, _
         End If
     Next c
     Set AutoFitAll = Me
+End Function
+
+' Reconciles two metric values (e.g. KPI value vs Table total) within an optional numerical Tolerance.
+' Returns True if values match, or False and records a warning in Warnings collection if they differ.
+Public Function Reconcile(ByVal ExpectedValue As Variant, _
+                          ByVal ActualValue As Variant, _
+                          Optional ByVal Tolerance As Double = 0.0001, _
+                          Optional ByVal MetricName As String = "Metric") As Boolean
+    Dim expNum As Double, actNum As Double
+    On Error Resume Next
+    expNum = CDbl(ExpectedValue)
+    actNum = CDbl(ActualValue)
+    If Err.Number <> 0 Then
+        Err.Clear
+        On Error GoTo 0
+        If CStr(ExpectedValue) = CStr(ActualValue) Then
+            Reconcile = True
+        Else
+            AddWarning "Reconciliation Mismatch [" & MetricName & "]: Expected '" & _
+                       CStr(ExpectedValue) & "', Got '" & CStr(ActualValue) & "'."
+            Reconcile = False
+        End If
+        Exit Function
+    End If
+    On Error GoTo 0
+
+    Dim diff As Double
+    diff = Abs(expNum - actNum)
+    If diff <= Tolerance Then
+        Reconcile = True
+    Else
+        AddWarning "Reconciliation Mismatch [" & MetricName & "]: Expected " & _
+                   expNum & ", Got " & actNum & " (Diff: " & diff & " > " & Tolerance & ")."
+        Reconcile = False
+    End If
 End Function
 
 ' Clears the area previously written by this builder instance, unmerges cells,
