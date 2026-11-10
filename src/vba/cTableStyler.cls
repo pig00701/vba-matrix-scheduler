@@ -126,6 +126,10 @@ Public Function Attach(ByVal TargetRangeOrTopLeft As Object, _
 
     Set mTopLeftCell = TargetRangeOrTopLeft.Cells(1, 1)
     Set mWorksheet = mTopLeftCell.Worksheet
+    If mWorksheet.ProtectContents Then
+        Err.Raise 1004, "cTableStyler.Attach", _
+            "Cannot attach styler: Worksheet '" & mWorksheet.Name & "' is protected."
+    End If
     mRowCount = SourceDataFrame.RowCount
     mColumnCount = SourceDataFrame.ColumnCount
     mHasHeaders = HasHeaders
@@ -193,6 +197,10 @@ Public Function AttachRange(ByVal SourceRange As Object, _
 
     Set mTopLeftCell = target.Cells(1, 1)
     Set mWorksheet = mTopLeftCell.Worksheet
+    If mWorksheet.ProtectContents Then
+        Err.Raise 1004, "cTableStyler.AttachRange", _
+            "Cannot attach styler: Worksheet '" & mWorksheet.Name & "' is protected."
+    End If
     mHasHeaders = HasHeaders
     mTotalRowHighlighted = False
 
@@ -222,17 +230,24 @@ Public Function AttachRange(ByVal SourceRange As Object, _
                 Set mDataBodyRange = Nothing
             End If
 
-            ' Read header row values into mColIndexMap
+            ' Read header row values into mColIndexMap safely
             Dim headerVals As Variant
             headerVals = mHeaderRange.Value2
-            Dim hName As String
+            Dim hName As String, rawH As Variant
             For c = 1 To mColumnCount
                 If mColumnCount = 1 Then
-                    hName = Trim$(CStr(headerVals))
+                    rawH = headerVals
                 Else
-                    hName = Trim$(CStr(headerVals(1, c)))
+                    rawH = headerVals(1, c)
                 End If
-                If Len(hName) = 0 Then hName = "Col" & CStr(c)
+                If IsError(rawH) Then
+                    hName = "Col" & CStr(c)
+                ElseIf IsNull(rawH) Or IsEmpty(rawH) Then
+                    hName = "Col" & CStr(c)
+                Else
+                    hName = Trim$(CStr(rawH))
+                    If Len(hName) = 0 Then hName = "Col" & CStr(c)
+                End If
                 If Not mColIndexMap.Exists(hName) Then
                     mColIndexMap.Item(hName) = c
                 End If

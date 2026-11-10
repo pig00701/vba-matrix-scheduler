@@ -150,6 +150,9 @@ Public Function ResolveUniqueHeader(ByVal CandidateName As String, _
 End Function
 
 Public Sub ShrinkToFit()
+    If mColListCount <> mCols.Count Then
+        SyncColList
+    End If
     Dim c As Long
     For c = 1 To mColListCount
         mColList(c).ShrinkToFit
@@ -1152,9 +1155,6 @@ Public Function Merge(ByVal RightTable As cDataFrame, _
         rightKeySet.Add rightKeyNames(k), k
     Next k
 
-    Dim unitSep As String
-    unitSep = Chr$(30)
-
     ' 2. Fast path for LEFT_ANTI and LEFT_SEMI (returns only LeftTable schema)
     If joinType = "LEFT_ANTI" Or joinType = "LEFT_SEMI" Then
         Dim semiDf As cDataFrame
@@ -1170,10 +1170,14 @@ Public Function Merge(ByVal RightTable As cDataFrame, _
 
         Dim rR As Long, rK As String
         For rR = 1 To RightTable.RowCount
-            rK = SafeKeyString(rightKeyCols(1).Item(rR))
-            For k = 2 To numKeys
-                rK = rK & unitSep & SafeKeyString(rightKeyCols(k).Item(rR))
-            Next k
+            If numKeys = 1 Then
+                rK = SafeKeyString(rightKeyCols(1).Item(rR))
+            Else
+                rK = ""
+                For k = 1 To numKeys
+                    rK = rK & FormatCompositeKeyPart(rightKeyCols(k).Item(rR))
+                Next k
+            End If
             If Not rightDistinctKeys.Exists(rK) Then
                 rightDistinctKeys.Add rK, True
             End If
@@ -1195,10 +1199,14 @@ Public Function Merge(ByVal RightTable As cDataFrame, _
 
         Dim rL As Long, lK As String, existsInRight As Boolean
         For rL = 1 To mRowCount
-            lK = SafeKeyString(leftKeyCols(1).Item(rL))
-            For k = 2 To numKeys
-                lK = lK & unitSep & SafeKeyString(leftKeyCols(k).Item(rL))
-            Next k
+            If numKeys = 1 Then
+                lK = SafeKeyString(leftKeyCols(1).Item(rL))
+            Else
+                lK = ""
+                For k = 1 To numKeys
+                    lK = lK & FormatCompositeKeyPart(leftKeyCols(k).Item(rL))
+                Next k
+            End If
             existsInRight = rightDistinctKeys.Exists(lK)
 
             If (joinType = "LEFT_SEMI" And existsInRight) Or _
@@ -1316,10 +1324,14 @@ Public Function Merge(ByVal RightTable As cDataFrame, _
 
     Dim rRight As Long, kRight As String, rowList As Collection
     For rRight = 1 To RightTable.RowCount
-        kRight = SafeKeyString(rightKeyCols(1).Item(rRight))
-        For k = 2 To numKeys
-            kRight = kRight & unitSep & SafeKeyString(rightKeyCols(k).Item(rRight))
-        Next k
+        If numKeys = 1 Then
+            kRight = SafeKeyString(rightKeyCols(1).Item(rRight))
+        Else
+            kRight = ""
+            For k = 1 To numKeys
+                kRight = kRight & FormatCompositeKeyPart(rightKeyCols(k).Item(rRight))
+            Next k
+        End If
         If Not rightHash.Exists(kRight) Then
             Set rowList = New Collection
             rightHash.Add kRight, rowList
@@ -1341,10 +1353,14 @@ Public Function Merge(ByVal RightTable As cDataFrame, _
     ReDim rowVals(0 To outCount - 1)
 
     For rLeft = 1 To mRowCount
-        kLeft = SafeKeyString(leftKeyCols(1).Item(rLeft))
-        For k = 2 To numKeys
-            kLeft = kLeft & unitSep & SafeKeyString(leftKeyCols(k).Item(rLeft))
-        Next k
+        If numKeys = 1 Then
+            kLeft = SafeKeyString(leftKeyCols(1).Item(rLeft))
+        Else
+            kLeft = ""
+            For k = 1 To numKeys
+                kLeft = kLeft & FormatCompositeKeyPart(leftKeyCols(k).Item(rLeft))
+            Next k
+        End If
 
         If rightHash.Exists(kLeft) Then
             Set matchRows = rightHash.Item(kLeft)
@@ -1530,16 +1546,13 @@ Public Function GroupBy(ByVal GroupColumns As Variant, _
     numUniqueGroups = 0
 
     Dim r As Long, compKey As String, gIdx As Long
-    Dim unitSep As String
-    unitSep = Chr$(30)
-
     For r = 1 To mRowCount
         If numGroupCols = 1 Then
             compKey = SafeKeyString(groupColObjs(1).Item(r))
         Else
-            compKey = SafeKeyString(groupColObjs(1).Item(r))
-            For g = 2 To numGroupCols
-                compKey = compKey & unitSep & SafeKeyString(groupColObjs(g).Item(r))
+            compKey = ""
+            For g = 1 To numGroupCols
+                compKey = compKey & FormatCompositeKeyPart(groupColObjs(g).Item(r))
             Next g
         End If
 
@@ -1946,8 +1959,16 @@ Public Function LoadFromRange(ByVal SourceRange As Object, _
     Dim c As Long, r As Long, headerName As String, col As cColumn
     For c = 1 To totalCols
         If HasHeaders Then
-            headerName = Trim$(CStr(vData(rLb, cLb + c - 1)))
-            If Len(headerName) = 0 Then headerName = "Column_" & c
+            Dim rawHdr As Variant
+            rawHdr = vData(rLb, cLb + c - 1)
+            If IsError(rawHdr) Then
+                headerName = "Column_Err_" & c
+            ElseIf IsNull(rawHdr) Or IsEmpty(rawHdr) Then
+                headerName = "Column_" & c
+            Else
+                headerName = Trim$(CStr(rawHdr))
+                If Len(headerName) = 0 Then headerName = "Column_" & c
+            End If
         Else
             headerName = "Column_" & c
         End If
@@ -1987,9 +2008,22 @@ Public Sub ToRange(ByVal TargetCell As Object, _
 
     If mCols.Count = 0 Then Exit Sub
 
+    Dim ws As Object
+    Set ws = TargetCell.Worksheet
+    If ws.ProtectContents Then
+        Err.Raise 1004, "cDataFrame.ToRange", _
+            "Cannot write to protected worksheet '" & ws.Name & "'."
+    End If
+
     Dim outputRows As Long
     outputRows = mRowCount + IIf(IncludeHeaders, 1, 0)
     If outputRows = 0 Then Exit Sub
+
+    Dim destRng As Object
+    Set destRng = TargetCell.Resize(outputRows, mCols.Count)
+    If destRng.MergeCells Then
+        destRng.UnMerge
+    End If
 
     Dim outArr() As Variant
     ReDim outArr(1 To outputRows, 1 To mCols.Count)
@@ -2016,7 +2050,7 @@ Public Sub ToRange(ByVal TargetCell As Object, _
         Next c
     End If
 
-    TargetCell.Resize(outputRows, mCols.Count).Value2 = outArr
+    destRng.Value2 = outArr
 End Sub
 
 ' Loads an Excel Table (ListObject) in at most 1-2 COM reads, safely ignoring TotalsRowRange.
@@ -4067,14 +4101,17 @@ Public Function DropDuplicates(Optional ByVal SubsetColumns As Variant, _
     numGroups = 0
 
     Dim r As Long, compKey As String, gIdx As Long
-    Dim unitSep As String
-    unitSep = Chr$(30)
-
     For r = 1 To mRowCount
-        compKey = SafeDedupToken(subColObjs(1).Item(r))
-        For s = 2 To numSubCols
-            compKey = compKey & unitSep & SafeDedupToken(subColObjs(s).Item(r))
-        Next s
+        If numSubCols = 1 Then
+            compKey = SafeDedupToken(subColObjs(1).Item(r))
+        Else
+            compKey = ""
+            For s = 1 To numSubCols
+                Dim dedupTok As String
+                dedupTok = SafeDedupToken(subColObjs(s).Item(r))
+                compKey = compKey & CStr(Len(dedupTok)) & ":" & dedupTok & "|"
+            Next s
+        End If
 
         If groupDict.Exists(compKey) Then
             gIdx = groupDict.Item(compKey)

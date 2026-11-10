@@ -393,17 +393,26 @@ End Sub
 ' Vector Math & Analytics Helpers
 ' ------------------------------------------------------------------------------
 
-Public Function Sum() As Double
-    Dim total As Double
+Public Function Sum(Optional ByVal UseDecimal As Boolean = False) As Variant
     Dim i As Long
-
-    For i = 1 To mCount
-        If IsNumeric(mData(i)) And Not IsEmpty(mData(i)) And Not IsNull(mData(i)) Then
-            total = total + CDbl(mData(i))
-        End If
-    Next i
-
-    Sum = total
+    If UseDecimal Then
+        Dim decTotal As Variant
+        decTotal = CDec(0)
+        For i = 1 To mCount
+            If IsNumeric(mData(i)) And Not IsEmpty(mData(i)) And Not IsNull(mData(i)) Then
+                decTotal = decTotal + CDec(mData(i))
+            End If
+        Next i
+        Sum = decTotal
+    Else
+        Dim total As Double
+        For i = 1 To mCount
+            If IsNumeric(mData(i)) And Not IsEmpty(mData(i)) And Not IsNull(mData(i)) Then
+                total = total + CDbl(mData(i))
+            End If
+        Next i
+        Sum = total
+    End If
 End Function
 
 Public Function Average() As Double
