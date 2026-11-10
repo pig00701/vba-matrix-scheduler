@@ -1291,6 +1291,61 @@ Public Function Shift(Optional ByVal Periods As Long = 1, _
     Set Shift = res
 End Function
 
+' Fluent alias for Shift(Periods, FillValue): Retrieves value from Periods rows prior
+Public Function Lag(Optional ByVal Periods As Long = 1, _
+                    Optional ByVal FillValue As Variant = Empty, _
+                    Optional ByVal ResultName As String = "") As cColumn
+    Set Lag = Shift(Periods, FillValue, ResultName)
+End Function
+
+' Fluent alias for Shift(-Periods, FillValue): Retrieves value from Periods rows ahead
+Public Function Lead(Optional ByVal Periods As Long = 1, _
+                     Optional ByVal FillValue As Variant = Empty, _
+                     Optional ByVal ResultName As String = "") As cColumn
+    Set Lead = Shift(-Periods, FillValue, ResultName)
+End Function
+
+' Computes the difference between current element and previous element: v(i) - v(i - Periods)
+Public Function Diff(Optional ByVal Periods As Long = 1, _
+                     Optional ByVal ResultName As String = "") As cColumn
+    If Periods <= 0 Then
+        Err.Raise 5, "cColumn.Diff", "Periods must be greater than 0."
+    End If
+
+    Dim res As New cColumn
+    If Len(Trim$(ResultName)) > 0 Then
+        res.Name = Trim$(ResultName)
+    Else
+        res.Name = mName & "_Diff"
+    End If
+
+    If mCount = 0 Then
+        Set Diff = res
+        Exit Function
+    End If
+
+    res.EnsureCapacity mCount
+    res.SetCount mCount
+
+    Dim i As Long, srcIdx As Long, vCur As Variant, vPrev As Variant
+    For i = 1 To mCount
+        srcIdx = i - Periods
+        If srcIdx >= 1 Then
+            vCur = mData(i)
+            vPrev = mData(srcIdx)
+            If IsNumeric(vCur) And IsNumeric(vPrev) And Not IsEmpty(vCur) And Not IsEmpty(vPrev) Then
+                res.Item(i) = CDbl(vCur) - CDbl(vPrev)
+            Else
+                res.Item(i) = Empty
+            End If
+        Else
+            res.Item(i) = Empty
+        End If
+    Next i
+
+    Set Diff = res
+End Function
+
 ' Calculates fractional percentage change (v_cur - v_prev) / v_prev over Periods
 Public Function PctChange(Optional ByVal Periods As Long = 1, _
                           Optional ByVal FillValue As Variant = Empty, _

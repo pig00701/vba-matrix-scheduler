@@ -1665,6 +1665,58 @@ Public Function GroupBy(ByVal GroupColumns As Variant, _
     Set GroupBy = resultDf
 End Function
 
+' Splits the DataFrame into a Dictionary of child cDataFrame instances partitioned by unique values of ColumnName.
+' Dictionary Keys: Unique group names (String)
+' Dictionary Items: cDataFrame containing rows belonging to that group
+Public Function SplitBy(ByVal ColumnName As String) As Object
+    Dim resolvedCol As String
+    resolvedCol = ResolveColName(ColumnName)
+
+    Dim groupDict As Object
+    Set groupDict = CreateObject("Scripting.Dictionary")
+    groupDict.CompareMode = IIf(mCaseSensitive, 0, 1)
+
+    If mRowCount = 0 Then
+        Set SplitBy = groupDict
+        Exit Function
+    End If
+
+    Dim splitCol As cColumn
+    Set splitCol = mCols.Item(resolvedCol)
+
+    Dim numCols As Long
+    numCols = mCols.Count
+    Dim colKeys As Variant
+    colKeys = mCols.Keys
+    Dim colObjs() As cColumn
+    ReDim colObjs(0 To numCols - 1)
+    Dim c As Long
+    For c = 0 To numCols - 1
+        Set colObjs(c) = mCols.Item(colKeys(c))
+    Next c
+
+    Dim r As Long, gKey As String, childDf As cDataFrame
+    Dim rowVals() As Variant
+    ReDim rowVals(0 To numCols - 1)
+
+    For r = 1 To mRowCount
+        gKey = SafeKeyString(splitCol.Item(r))
+        If Not groupDict.Exists(gKey) Then
+            Set childDf = Me.Clone(True)
+            groupDict.Add gKey, childDf
+        Else
+            Set childDf = groupDict.Item(gKey)
+        End If
+
+        For c = 0 To numCols - 1
+            rowVals(c) = colObjs(c).Item(r)
+        Next c
+        childDf.AddRow rowVals
+    Next r
+
+    Set SplitBy = groupDict
+End Function
+
 ' Fast O(N) Cross-Tabulation / Pivot Table generator.
 ' Unique values of IndexColumn become rows (with active O(1) SetIndex);
 ' unique values of PivotColumn become dynamic columns;
