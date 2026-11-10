@@ -33,8 +33,11 @@ Private mTableRange As Object          ' Excel.Range spanning entire styled tabl
 Private mHeaderRange As Object         ' Excel.Range spanning header row (or Nothing)
 Private mDataBodyRange As Object       ' Excel.Range spanning data body rows (or Nothing)
 Private mTotalRowHighlighted As Boolean' Track if total row has been highlighted
-Private mInBatchOperation As Boolean   ' Track screen updating suppression
+Private mInBatchOperation As Boolean   ' Track screen updating & environment suppression
 Private mPrevScreenUpdating As Boolean ' Stored ScreenUpdating state
+Private mPrevCalculation As Long       ' Stored Calculation state
+Private mPrevEnableEvents As Boolean   ' Stored EnableEvents state
+Private mPrevDisplayAlerts As Boolean  ' Stored DisplayAlerts state
 
 ' ------------------------------------------------------------------------------
 ' Lifecycle
@@ -49,6 +52,9 @@ Private Sub Class_Initialize()
     mTotalRowHighlighted = False
     mInBatchOperation = False
     mPrevScreenUpdating = True
+    mPrevCalculation = -4105 ' xlCalculationAutomatic
+    mPrevEnableEvents = True
+    mPrevDisplayAlerts = True
     Set mTopLeftCell = Nothing
     Set mWorksheet = Nothing
     Set mTableRange = Nothing
@@ -167,27 +173,139 @@ Public Function Attach(ByVal TargetRangeOrTopLeft As Object, _
     Set Attach = Me
 End Function
 
+' Binds styler to an existing Excel Range (worksheet range or table) without requiring a cDataFrame instance.
+' Automatically inspects header names, row/column counts, and populates column name map.
+Public Function AttachRange(ByVal SourceRange As Object, _
+                            Optional ByVal HasHeaders As Boolean = True) As cTableStyler
+    If SourceRange Is Nothing Then
+        Err.Raise 91, "cTableStyler.AttachRange", "SourceRange cannot be Nothing."
+    End If
+
+    Dim target As Object
+    Set target = SourceRange
+
+    ' If a single cell is passed, expand to CurrentRegion if it has content
+    If target.Rows.Count = 1 And target.Columns.Count = 1 Then
+        If Not IsEmpty(target.Value2) Then
+            Set target = target.CurrentRegion
+        End If
+    End If
+
+    Set mTopLeftCell = target.Cells(1, 1)
+    Set mWorksheet = mTopLeftCell.Worksheet
+    mHasHeaders = HasHeaders
+    mTotalRowHighlighted = False
+
+    Dim totalRows As Long, totalCols As Long
+    totalRows = target.Rows.Count
+    totalCols = target.Columns.Count
+    mColumnCount = totalCols
+
+    If mHasHeaders Then
+        mRowCount = totalRows - 1
+        If mRowCount < 0 Then mRowCount = 0
+    Else
+        mRowCount = totalRows
+    End If
+
+    mColIndexMap.RemoveAll
+    mColIndexMap.CompareMode = 1 ' vbTextCompare (case-insensitive)
+
+    If mColumnCount > 0 And totalRows > 0 Then
+        Set mTableRange = target
+        Dim c As Long
+        If mHasHeaders Then
+            Set mHeaderRange = target.Rows(1)
+            If mRowCount > 0 Then
+                Set mDataBodyRange = target.Offset(1, 0).Resize(mRowCount, mColumnCount)
+            Else
+                Set mDataBodyRange = Nothing
+            End If
+
+            ' Read header row values into mColIndexMap
+            Dim headerVals As Variant
+            headerVals = mHeaderRange.Value2
+            Dim hName As String
+            For c = 1 To mColumnCount
+                If mColumnCount = 1 Then
+                    hName = Trim$(CStr(headerVals))
+                Else
+                    hName = Trim$(CStr(headerVals(1, c)))
+                End If
+                If Len(hName) = 0 Then hName = "Col" & CStr(c)
+                If Not mColIndexMap.Exists(hName) Then
+                    mColIndexMap.Item(hName) = c
+                End If
+            Next c
+        Else
+            Set mHeaderRange = Nothing
+            If mRowCount > 0 Then
+                Set mDataBodyRange = target
+            Else
+                Set mDataBodyRange = Nothing
+            End If
+            For c = 1 To mColumnCount
+                mColIndexMap.Item("Col" & CStr(c)) = c
+            Next c
+        End If
+    Else
+        Set mTableRange = Nothing
+        Set mHeaderRange = Nothing
+        Set mDataBodyRange = Nothing
+    End If
+
+    Set AttachRange = Me
+End Function
+
+' Binds styler directly to an existing Excel ListObject (Table).
+Public Function AttachListObject(ByVal TableObj As Object) As cTableStyler
+    If TableObj Is Nothing Then
+        Err.Raise 91, "cTableStyler.AttachListObject", "TableObj cannot be Nothing."
+    End If
+    Dim hasHdrs As Boolean
+    hasHdrs = True
+    On Error Resume Next
+    hasHdrs = TableObj.ShowHeaders
+    On Error GoTo 0
+    AttachRange TableObj.Range, HasHeaders:=hasHdrs
+    Set AttachListObject = Me
+End Function
+
 ' ------------------------------------------------------------------------------
 ' Screen Updating Optimization Helpers
 ' ------------------------------------------------------------------------------
 
-' Suppresses Excel screen updates for batch styling operations
+' Suppresses Excel screen updates, events, and automatic calculation for batch styling operations.
+' Crash-safe RAII design: Class_Terminate automatically invokes EndUpdate to guarantee state restoration.
 Public Function BeginUpdate() As cTableStyler
     If Not mInBatchOperation And Not mWorksheet Is Nothing Then
         On Error Resume Next
-        mPrevScreenUpdating = mWorksheet.Application.ScreenUpdating
-        mWorksheet.Application.ScreenUpdating = False
+        Dim appObj As Object
+        Set appObj = mWorksheet.Application
+        mPrevScreenUpdating = appObj.ScreenUpdating
+        mPrevCalculation = appObj.Calculation
+        mPrevEnableEvents = appObj.EnableEvents
+        mPrevDisplayAlerts = appObj.DisplayAlerts
+
+        appObj.ScreenUpdating = False
+        appObj.Calculation = -4135 ' xlCalculationManual
+        appObj.EnableEvents = False
         mInBatchOperation = True
         On Error GoTo 0
     End If
     Set BeginUpdate = Me
 End Function
 
-' Restores previous Excel screen updating state
+' Restores previous Excel screen updating, calculation mode, and events state
 Public Function EndUpdate() As cTableStyler
     If mInBatchOperation And Not mWorksheet Is Nothing Then
         On Error Resume Next
-        mWorksheet.Application.ScreenUpdating = mPrevScreenUpdating
+        Dim appObj As Object
+        Set appObj = mWorksheet.Application
+        appObj.Calculation = mPrevCalculation
+        appObj.EnableEvents = mPrevEnableEvents
+        appObj.DisplayAlerts = mPrevDisplayAlerts
+        appObj.ScreenUpdating = mPrevScreenUpdating
         mInBatchOperation = False
         On Error GoTo 0
     End If
@@ -440,6 +558,112 @@ Public Function HighlightTotalRow(Optional ByVal TopBorder As Boolean = True, _
     mTotalRowHighlighted = True
 
     Set HighlightTotalRow = Me
+End Function
+
+' Dynamically writes a summary Total Row below the data body with live Excel formulas (SUBTOTAL or SUM/AVERAGE/COUNTA),
+' copies column number formats, expands table dimensions, and formats with bold font and accounting double bottom border.
+Public Function AddTotalRow(Optional ByVal SumColumns As Variant, _
+                            Optional ByVal AvgColumns As Variant, _
+                            Optional ByVal CountColumns As Variant, _
+                            Optional ByVal LabelColumn As Variant = 1, _
+                            Optional ByVal LabelText As String = "Total", _
+                            Optional ByVal UseSubtotal As Boolean = True, _
+                            Optional ByVal TopBorder As Boolean = True, _
+                            Optional ByVal DoubleBottomBorder As Boolean = True) As cTableStyler
+    If mTableRange Is Nothing Or mRowCount = 0 Or mDataBodyRange Is Nothing Then
+        Set AddTotalRow = Me
+        Exit Function
+    End If
+
+    ' Locate target row directly below current table range
+    Dim totalRowRng As Object
+    Set totalRowRng = mTableRange.Rows(mTableRange.Rows.Count + 1)
+
+    ' 1. Write summary label
+    If Not IsMissing(LabelColumn) And Not IsEmpty(LabelColumn) Then
+        Dim labelColIdx As Long
+        labelColIdx = ResolveColIndex(LabelColumn)
+        If labelColIdx >= 1 And labelColIdx <= mColumnCount Then
+            totalRowRng.Cells(1, labelColIdx).Value2 = LabelText
+        End If
+    End If
+
+    Dim i As Long, cIdx As Long, colAddr As String
+
+    ' 2. Process SUM / SUBTOTAL(9)
+    If Not IsMissing(SumColumns) And Not IsEmpty(SumColumns) Then
+        Dim sumIndices() As Long
+        sumIndices = ResolveColIndices(SumColumns)
+        If UBound(sumIndices) >= LBound(sumIndices) Then
+            For i = LBound(sumIndices) To UBound(sumIndices)
+                cIdx = sumIndices(i)
+                If cIdx >= 1 And cIdx <= mColumnCount Then
+                    colAddr = mDataBodyRange.Columns(cIdx).Address(RowAbsolute:=False, ColumnAbsolute:=False)
+                    If UseSubtotal Then
+                        totalRowRng.Cells(1, cIdx).Formula = "=SUBTOTAL(9," & colAddr & ")"
+                    Else
+                        totalRowRng.Cells(1, cIdx).Formula = "=SUM(" & colAddr & ")"
+                    End If
+                    On Error Resume Next
+                    totalRowRng.Cells(1, cIdx).NumberFormat = mDataBodyRange.Columns(cIdx).Cells(1, 1).NumberFormat
+                    On Error GoTo 0
+                End If
+            Next i
+        End If
+    End If
+
+    ' 3. Process AVERAGE / SUBTOTAL(1)
+    If Not IsMissing(AvgColumns) And Not IsEmpty(AvgColumns) Then
+        Dim avgIndices() As Long
+        avgIndices = ResolveColIndices(AvgColumns)
+        If UBound(avgIndices) >= LBound(avgIndices) Then
+            For i = LBound(avgIndices) To UBound(avgIndices)
+                cIdx = avgIndices(i)
+                If cIdx >= 1 And cIdx <= mColumnCount Then
+                    colAddr = mDataBodyRange.Columns(cIdx).Address(RowAbsolute:=False, ColumnAbsolute:=False)
+                    If UseSubtotal Then
+                        totalRowRng.Cells(1, cIdx).Formula = "=SUBTOTAL(1," & colAddr & ")"
+                    Else
+                        totalRowRng.Cells(1, cIdx).Formula = "=AVERAGE(" & colAddr & ")"
+                    End If
+                    On Error Resume Next
+                    totalRowRng.Cells(1, cIdx).NumberFormat = mDataBodyRange.Columns(cIdx).Cells(1, 1).NumberFormat
+                    On Error GoTo 0
+                End If
+            Next i
+        End If
+    End If
+
+    ' 4. Process COUNTA / SUBTOTAL(3)
+    If Not IsMissing(CountColumns) And Not IsEmpty(CountColumns) Then
+        Dim cntIndices() As Long
+        cntIndices = ResolveColIndices(CountColumns)
+        If UBound(cntIndices) >= LBound(cntIndices) Then
+            For i = LBound(cntIndices) To UBound(cntIndices)
+                cIdx = cntIndices(i)
+                If cIdx >= 1 And cIdx <= mColumnCount Then
+                    colAddr = mDataBodyRange.Columns(cIdx).Address(RowAbsolute:=False, ColumnAbsolute:=False)
+                    If UseSubtotal Then
+                        totalRowRng.Cells(1, cIdx).Formula = "=SUBTOTAL(3," & colAddr & ")"
+                    Else
+                        totalRowRng.Cells(1, cIdx).Formula = "=COUNTA(" & colAddr & ")"
+                    End If
+                End If
+            Next i
+        End If
+    End If
+
+    ' 5. Expand internal table range to include new total row
+    mRowCount = mRowCount + 1
+    Dim totalRows As Long
+    totalRows = mRowCount + IIf(mHasHeaders, 1, 0)
+    Set mTableRange = mTopLeftCell.Resize(totalRows, mColumnCount)
+    Set mDataBodyRange = mTopLeftCell.Offset(IIf(mHasHeaders, 1, 0), 0).Resize(mRowCount, mColumnCount)
+
+    ' 6. Apply total row styling
+    HighlightTotalRow TopBorder:=TopBorder, DoubleBottomBorder:=DoubleBottomBorder
+
+    Set AddTotalRow = Me
 End Function
 
 ' ------------------------------------------------------------------------------
@@ -710,6 +934,90 @@ Public Function HighlightValues(ByVal ColumnKeyOrPattern As Variant, _
     Next i
 
     Set HighlightValues = Me
+End Function
+
+' Applies conditional formatting based on comparison operators (>, <, >=, <=, =, <>, BETWEEN, NOT_BETWEEN).
+' Supports numeric thresholds and range boundaries across single columns, comma-delimited strings, or wildcards.
+Public Function HighlightCondition(ByVal ColumnKeyOrPattern As Variant, _
+                                   ByVal Operator As Variant, _
+                                   ByVal Formula1 As Variant, _
+                                   ByVal BgColor As Long, _
+                                   Optional ByVal FontColor As Long = -1, _
+                                   Optional ByVal Bold As Boolean = False, _
+                                   Optional ByVal Formula2 As Variant) As cTableStyler
+    If mDataBodyRange Is Nothing Or mRowCount = 0 Then
+        Set HighlightCondition = Me
+        Exit Function
+    End If
+
+    Dim colIndices() As Long
+    colIndices = ResolveColIndices(ColumnKeyOrPattern)
+    If UBound(colIndices) < LBound(colIndices) Then
+        Set HighlightCondition = Me
+        Exit Function
+    End If
+
+    Const xlCellValue As Long = 1
+    Const xlBetween As Long = 1
+    Const xlNotBetween As Long = 2
+    Const xlEqual As Long = 3
+    Const xlNotEqual As Long = 4
+    Const xlGreater As Long = 5
+    Const xlLess As Long = 6
+    Const xlGreaterEqual As Long = 7
+    Const xlLessEqual As Long = 8
+
+    Dim opCode As Long
+    If IsNumeric(Operator) Then
+        opCode = CLng(Operator)
+    Else
+        Select Case UCase$(Trim$(CStr(Operator)))
+            Case ">", "GT", "GREATER": opCode = xlGreater
+            Case "<", "LT", "LESS": opCode = xlLess
+            Case ">=", "GTE", "GE", "GREATER_EQUAL": opCode = xlGreaterEqual
+            Case "<=", "LTE", "LE", "LESS_EQUAL": opCode = xlLessEqual
+            Case "=", "==", "EQ", "EQUAL": opCode = xlEqual
+            Case "<>", "!=", "NE", "NOT_EQUAL": opCode = xlNotEqual
+            Case "BETWEEN": opCode = xlBetween
+            Case "NOT_BETWEEN", "NOT BETWEEN": opCode = xlNotBetween
+            Case Else: opCode = xlEqual
+        End Select
+    End If
+
+    Dim f1Str As String, f2Str As String
+    If VarType(Formula1) = vbString And Not IsNumeric(Formula1) Then
+        f1Str = Chr$(34) & CStr(Formula1) & Chr$(34)
+    Else
+        f1Str = CStr(Formula1)
+    End If
+
+    If Not IsMissing(Formula2) And Not IsEmpty(Formula2) Then
+        If VarType(Formula2) = vbString And Not IsNumeric(Formula2) Then
+            f2Str = Chr$(34) & CStr(Formula2) & Chr$(34)
+        Else
+            f2Str = CStr(Formula2)
+        End If
+    End If
+
+    Dim i As Long, cIdx As Long
+    For i = LBound(colIndices) To UBound(colIndices)
+        cIdx = colIndices(i)
+        If cIdx >= 1 And cIdx <= mColumnCount Then
+            Dim colRng As Object
+            Set colRng = mDataBodyRange.Columns(cIdx)
+            Dim fc As Object
+            If opCode = xlBetween Or opCode = xlNotBetween Then
+                Set fc = colRng.FormatConditions.Add(Type:=xlCellValue, Operator:=opCode, Formula1:=f1Str, Formula2:=f2Str)
+            Else
+                Set fc = colRng.FormatConditions.Add(Type:=xlCellValue, Operator:=opCode, Formula1:=f1Str)
+            End If
+            fc.Interior.Color = BgColor
+            If FontColor >= 0 Then fc.Font.Color = FontColor
+            If Bold Then fc.Font.Bold = True
+        End If
+    Next i
+
+    Set HighlightCondition = Me
 End Function
 
 ' Freezes worksheet panes at the boundary of the table (header row and leading columns).
