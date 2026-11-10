@@ -60,6 +60,12 @@ Private mWarnings As Collection
 Private mSnapshotRow As Long
 Private mSnapshotMaxCol As Long
 
+' Column grouping state (side-by-side layout)
+Private mInColumnGroup As Boolean
+Private mGroupStartRow As Long
+Private mGroupMaxRow As Long
+Private mGroupAnchorCol As Long
+
 ' Environment guard state (RAII, restored in EndUpdate / Class_Terminate)
 Private mInBatch As Boolean
 Private mPrevScreenUpdating As Boolean
@@ -74,6 +80,10 @@ Private Sub Class_Initialize()
     mMaxCol = 2
     mSnapshotRow = 2
     mSnapshotMaxCol = 2
+    mInColumnGroup = False
+    mGroupStartRow = 2
+    mGroupMaxRow = 2
+    mGroupAnchorCol = 2
     mInBatch = False
     mPrevScreenUpdating = True
     mPrevCalculation = -4105 ' xlCalculationAutomatic
@@ -125,6 +135,10 @@ Public Function Attach(ByVal TargetWorksheet As Object, _
     mMaxCol = mStartCol
     mSnapshotRow = mStartRow
     mSnapshotMaxCol = mStartCol
+    mInColumnGroup = False
+    mGroupStartRow = mStartRow
+    mGroupMaxRow = mStartRow
+    mGroupAnchorCol = mStartCol
     Set mWarnings = New Collection
 
     Set Attach = Me
@@ -777,6 +791,10 @@ Public Function Clear() As cReportBuilder
     On Error GoTo 0
     mCurrentRow = mStartRow
     mMaxCol = mStartCol
+    mInColumnGroup = False
+    mGroupStartRow = mStartRow
+    mGroupMaxRow = mStartRow
+    mGroupAnchorCol = mStartCol
     Set mWarnings = New Collection
     Set Clear = Me
 End Function
@@ -803,6 +821,242 @@ Public Function QuickReport(ByVal TargetWorksheet As Object, _
     Me.AutoFitAll
     Me.EndUpdate
     Set QuickReport = Me
+End Function
+
+' ------------------------------------------------------------------------------
+' Multi-Column Side-by-Side Flow & Coordinate Positioning
+' ------------------------------------------------------------------------------
+
+' Begins a multi-column side-by-side section group.
+' Sections placed inside this group advance vertically. Call NextColumn to start
+' an adjacent column to the right at the exact same vertical start row.
+Public Function BeginColumnGroup() As cReportBuilder
+    CheckAttached "BeginColumnGroup"
+    If mInColumnGroup Then
+        Err.Raise 5, SRC & ".BeginColumnGroup", "Already inside a ColumnGroup. Call EndColumnGroup first."
+    End If
+    mInColumnGroup = True
+    mGroupStartRow = mCurrentRow
+    mGroupMaxRow = mCurrentRow
+    mGroupAnchorCol = mStartCol
+    Set BeginColumnGroup = Me
+End Function
+
+' Shifts flow to an adjacent column to the right, aligning vertically with the start of the current group.
+Public Function NextColumn(Optional ByVal ColGap As Long = 2) As cReportBuilder
+    CheckAttached "NextColumn"
+    If Not mInColumnGroup Then
+        Err.Raise 5, SRC & ".NextColumn", "Not inside a ColumnGroup. Call BeginColumnGroup first."
+    End If
+    If ColGap < 0 Then ColGap = 1
+    If mCurrentRow > mGroupMaxRow Then mGroupMaxRow = mCurrentRow
+    mCurrentRow = mGroupStartRow
+    mStartCol = mMaxCol + ColGap + 1
+    RequireColumns mStartCol, "NextColumn"
+    Set NextColumn = Me
+End Function
+
+' Concludes a multi-column side-by-side section group and moves CurrentRow below
+' the tallest column in the group, restoring horizontal alignment back to the group anchor column.
+Public Function EndColumnGroup(Optional ByVal ExtraRowGap As Long = 1) As cReportBuilder
+    CheckAttached "EndColumnGroup"
+    If Not mInColumnGroup Then
+        Err.Raise 5, SRC & ".EndColumnGroup", "Not inside a ColumnGroup."
+    End If
+    If mCurrentRow > mGroupMaxRow Then mGroupMaxRow = mCurrentRow
+    mCurrentRow = mGroupMaxRow + ExtraRowGap
+    mStartCol = mGroupAnchorCol
+    mInColumnGroup = False
+    Set EndColumnGroup = Me
+End Function
+
+' Explicitly moves the current write cursor to an absolute worksheet row and column.
+Public Function MoveTo(ByVal TargetRow As Long, ByVal TargetCol As Long) As cReportBuilder
+    CheckAttached "MoveTo"
+    RequireRows TargetRow, "MoveTo"
+    RequireColumns TargetCol, "MoveTo"
+    mCurrentRow = TargetRow
+    mStartCol = TargetCol
+    If TargetCol > mMaxCol Then mMaxCol = TargetCol
+    Set MoveTo = Me
+End Function
+
+' Embeds a native Excel chart onto the worksheet at the current flow cursor.
+' ChartType: 51 = xlColumnClustered, 4 = xlLine, 5 = xlPie, 57 = xlBarClustered.
+Public Function AddChart(Optional ByVal SourceRange As Object = Nothing, _
+                         Optional ByVal Title As String = "Metric Chart", _
+                         Optional ByVal ChartType As Long = 51, _
+                         Optional ByVal WidthColumns As Long = 6, _
+                         Optional ByVal HeightRows As Long = 12) As cReportBuilder
+    CheckAttached "AddChart"
+    If WidthColumns < 1 Then WidthColumns = 6
+    If HeightRows < 1 Then HeightRows = 12
+
+    Dim endCol As Long, endRow As Long
+    endCol = mStartCol + WidthColumns - 1
+    endRow = mCurrentRow + HeightRows - 1
+    RequireColumns endCol, "AddChart"
+    RequireRows endRow, "AddChart"
+
+    Dim topCell As Object, bottomCell As Object
+    Set topCell = mWorksheet.Cells(mCurrentRow, mStartCol)
+    Set bottomCell = mWorksheet.Cells(endRow, endCol)
+
+    Dim chartLeft As Double, chartTop As Double, chartWidth As Double, chartHeight As Double
+    chartLeft = CDbl(topCell.Left)
+    chartTop = CDbl(topCell.Top)
+    chartWidth = CDbl(bottomCell.Left + bottomCell.Width - topCell.Left)
+    chartHeight = CDbl(bottomCell.Top + bottomCell.Height - topCell.Top)
+
+    Dim co As Object
+    Set co = mWorksheet.ChartObjects.Add(chartLeft, chartTop, chartWidth, chartHeight)
+    co.Chart.ChartType = ChartType
+    co.Chart.HasTitle = True
+    co.Chart.ChartTitle.Text = Title
+
+    If Not SourceRange Is Nothing Then
+        co.Chart.SetSourceData SourceRange
+    End If
+
+    If endCol > mMaxCol Then mMaxCol = endCol
+    mCurrentRow = endRow + 2
+    Set AddChart = Me
+End Function
+
+' Configures print orientation, print area, and fit-to-page settings.
+Public Function ConfigurePageSetup(Optional ByVal Orientation As Long = 2, _
+                                   Optional ByVal FitToWide As Long = 1, _
+                                   Optional ByVal FitToTall As Long = 0) As cReportBuilder
+    CheckAttached "ConfigurePageSetup"
+    Dim ps As Object
+    On Error Resume Next
+    Set ps = mWorksheet.PageSetup
+    If Not ps Is Nothing Then
+        ps.PrintArea = BoundingRange.Address
+        ps.Orientation = Orientation ' 1 = xlPortrait, 2 = xlLandscape
+        If FitToWide > 0 Then
+            ps.Zoom = False
+            ps.FitToPagesWide = FitToWide
+            If FitToTall > 0 Then
+                ps.FitToPagesTall = FitToTall
+            Else
+                ps.FitToPagesTall = False
+            End If
+        End If
+        ps.CenterHorizontally = True
+    End If
+    On Error GoTo 0
+    Set ConfigurePageSetup = Me
+End Function
+
+' Exports the current worksheet report directly to a PDF document.
+Public Function ExportPDF(ByVal OutputFilePath As String) As cReportBuilder
+    CheckAttached "ExportPDF"
+    If Len(Trim$(OutputFilePath)) = 0 Then
+        Err.Raise 5, SRC & ".ExportPDF", "OutputFilePath cannot be blank."
+    End If
+    mWorksheet.ExportAsFixedFormat Type:=0, Filename:=OutputFilePath, Quality:=0, _
+                                   IncludeDocProperties:=True, IgnorePrintAreas:=False, _
+                                   OpenAfterPublish:=False
+    Set ExportPDF = Me
+End Function
+
+' Cleans a sheet name to adhere to Excel's 31-character limit and invalid character rules.
+Public Function SanitizeSheetName(ByVal Name As String) As String
+    Dim s As String, i As Long, ch As String
+    s = Trim$(Name)
+    If Len(s) = 0 Then s = "Sheet"
+    For i = 1 To Len(s)
+        ch = Mid$(s, i, 1)
+        Select Case ch
+            Case ":", "\", "/", "?", "*", "[", "]"
+                Mid$(s, i, 1) = "_"
+        End Select
+    Next i
+    Do While Left$(s, 1) = "'" And Len(s) > 1
+        s = Mid$(s, 2)
+    Loop
+    Do While Right$(s, 1) = "'" And Len(s) > 1
+        s = Left$(s, Len(s) - 1)
+    Loop
+    If Len(s) > 31 Then s = Left$(s, 31)
+    SanitizeSheetName = s
+End Function
+
+' Automatically partitions a DataFrame by GroupColumn (via df.SplitBy), generates an executive
+' worksheet for each partition, and creates a Table of Contents (TOC) master index sheet with live hyperlinks.
+Public Function BuildMultiSheetReport(ByVal TargetWorkbook As Object, _
+                                      ByVal Df As cDataFrame, _
+                                      ByVal GroupColumn As String, _
+                                      Optional ByVal TitlePrefix As String = "Report", _
+                                      Optional ByVal Theme As String = "Navy", _
+                                      Optional ByVal TocSheetName As String = "TOC") As Collection
+    If TargetWorkbook Is Nothing Then
+        Err.Raise 91, SRC & ".BuildMultiSheetReport", "TargetWorkbook cannot be Nothing."
+    End If
+    If Df Is Nothing Then
+        Err.Raise 91, SRC & ".BuildMultiSheetReport", "Df cannot be Nothing."
+    End If
+    If Not Df.HasColumn(GroupColumn) Then
+        Err.Raise 5, SRC & ".BuildMultiSheetReport", "GroupColumn '" & GroupColumn & "' not found in DataFrame."
+    End If
+
+    Dim splits As Collection
+    Set splits = Df.SplitBy(GroupColumn)
+
+    Dim groupColObj As cColumn
+    Set groupColObj = Df.Column(GroupColumn)
+    Dim uniqueGroups As Variant
+    uniqueGroups = groupColObj.Unique()
+
+    Dim createdSheets As New Collection
+    Dim wsToc As Object, wsGrp As Object, childRb As cReportBuilder
+    Dim i As Long, grpVal As String, safeName As String
+    Dim dfSub As cDataFrame
+
+    ' 1. Create individual group sheets
+    For i = LBound(uniqueGroups) To UBound(uniqueGroups)
+        grpVal = CStr(uniqueGroups(i))
+        safeName = SanitizeSheetName(grpVal)
+        Set wsGrp = TargetWorkbook.Worksheets.Add
+        wsGrp.Name = safeName
+
+        Set dfSub = splits.Item(i - LBound(uniqueGroups) + 1)
+
+        Set childRb = New cReportBuilder
+        childRb.QuickReport wsGrp, dfSub, Title:=TitlePrefix & " - " & grpVal, Theme:=Theme
+        createdSheets.Add wsGrp
+    Next i
+
+    ' 2. Create Master Table of Contents Sheet
+    Set wsToc = TargetWorkbook.Worksheets.Add(Before:=TargetWorkbook.Worksheets(1))
+    wsToc.Name = SanitizeSheetName(TocSheetName)
+
+    Dim tocRb As New cReportBuilder
+    tocRb.Attach wsToc, "B2"
+    tocRb.BeginUpdate
+    tocRb.AddBanner "Executive Table of Contents", Subtitle:="Multi-Sheet Index (" & TitlePrefix & ")", Theme:=Theme, WidthColumns:=4
+    tocRb.AddSpace 1
+
+    Dim dfToc As New cDataFrame
+    dfToc.AddColumn "Index"
+    dfToc.AddColumn "Group / Sheet"
+    dfToc.AddColumn "Records"
+
+    For i = LBound(uniqueGroups) To UBound(uniqueGroups)
+        grpVal = CStr(uniqueGroups(i))
+        Set dfSub = splits.Item(i - LBound(uniqueGroups) + 1)
+        dfToc.AddRow i - LBound(uniqueGroups) + 1, grpVal, dfSub.RowCount
+    Next i
+
+    tocRb.AddTable dfToc, Title:="Available Reports", StyleTheme:=Theme, AddTotalRow:=True
+    tocRb.AddSpace 1
+    tocRb.AddProvenanceFooter Author:="Auto-Report Engine", SourceDescription:="df.SplitBy('" & GroupColumn & "')"
+    tocRb.AutoFitAll
+    tocRb.EndUpdate
+
+    createdSheets.Add wsToc
+    Set BuildMultiSheetReport = createdSheets
 End Function
 
 ' ------------------------------------------------------------------------------
