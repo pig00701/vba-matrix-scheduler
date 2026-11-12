@@ -4577,3 +4577,180 @@ MatchError:
     EvaluateCondition = False
 End Function
 
+' Parses native VBA Dates, date strings, and numeric Excel serial dates (.Value2).
+Public Function TryParseExcelDate(ByVal Value As Variant, ByRef OutDate As Date) As Boolean
+    On Error GoTo BadDate
+    If IsEmpty(Value) Or IsNull(Value) Or IsError(Value) Then Exit Function
+
+    If IsDate(Value) Then
+        OutDate = DateValue(CDate(Value))
+        TryParseExcelDate = True
+        Exit Function
+    End If
+
+    If IsNumeric(Value) Then
+        Dim serialVal As Double
+        serialVal = CDbl(Value)
+        If serialVal >= 1# And serialVal < 2958466# Then
+            OutDate = DateValue(CDate(serialVal))
+            TryParseExcelDate = True
+        End If
+    End If
+    Exit Function
+
+BadDate:
+    TryParseExcelDate = False
+End Function
+
+' Aggregates row counts by RowKeyColumn across every calendar day (D01..Dnn) of a month,
+' optionally joined against a master roster DataFrame (MasterRowsDf) and padded to FixedMaxDays.
+Public Function BuildCalendarMatrix(ByVal DateColumn As Variant, _
+                                    ByVal RowKeyColumn As Variant, _
+                                    ByVal YearVal As Long, _
+                                    ByVal MonthVal As Long, _
+                                    Optional ByVal ExtraRowColumns As Variant, _
+                                    Optional ByVal MasterRowsDf As cDataFrame = Nothing, _
+                                    Optional ByVal MasterKeyColumn As String = "", _
+                                    Optional ByVal FixedMaxDays As Long = 31) As cDataFrame
+    If MonthVal < 1 Or MonthVal > 12 Then
+        Err.Raise 5, "cDataFrame.BuildCalendarMatrix", "MonthVal must be between 1 and 12."
+    End If
+
+    Dim dateColName As String, rowKeyName As String
+    dateColName = ResolveColName(DateColumn)
+    rowKeyName = ResolveColName(RowKeyColumn)
+
+    Dim extraCols() As String
+    Dim extraCount As Long
+    extraCount = 0
+    If Not IsMissing(ExtraRowColumns) And Not IsEmpty(ExtraRowColumns) Then
+        If IsArray(ExtraRowColumns) Then
+            Dim i As Long
+            For i = LBound(ExtraRowColumns) To UBound(ExtraRowColumns)
+                extraCount = extraCount + 1
+                ReDim Preserve extraCols(1 To extraCount)
+                extraCols(extraCount) = CStr(ExtraRowColumns(i))
+            Next i
+        ElseIf Len(Trim$(CStr(ExtraRowColumns))) > 0 Then
+            extraCount = 1
+            ReDim extraCols(1 To 1)
+            extraCols(1) = Trim$(CStr(ExtraRowColumns))
+        End If
+    End If
+
+    Dim daysInMonth As Long
+    daysInMonth = Day(DateSerial(YearVal, MonthVal + 1, 0))
+    Dim colDays As Long
+    colDays = IIf(FixedMaxDays > daysInMonth, FixedMaxDays, daysInMonth)
+
+    ' Tally daily counts in O(N)
+    Dim dayDict As Object
+    Set dayDict = CreateObject("Scripting.Dictionary")
+    dayDict.CompareMode = IIf(mCaseSensitive, 0, 1)
+
+    Dim colDate As cColumn, colKey As cColumn
+    Set colDate = Me.Column(dateColName)
+    Set colKey = Me.Column(rowKeyName)
+
+    Dim r As Long, dt As Date, kStr As String, cellKey As String
+    For r = 1 To mRowCount
+        If TryParseExcelDate(colDate.Item(r), dt) Then
+            If Year(dt) = YearVal And Month(dt) = MonthVal Then
+                kStr = Trim$(CStr(colKey.Item(r)))
+                cellKey = kStr & "|" & CStr(Day(dt))
+                If dayDict.Exists(cellKey) Then
+                    dayDict(cellKey) = dayDict(cellKey) + 1
+                Else
+                    dayDict.Add cellKey, 1
+                End If
+            End If
+        End If
+    Next r
+
+    ' Determine master rows source
+    Dim rosterDf As cDataFrame
+    Dim rosterKeyCol As String
+    If MasterRowsDf Is Nothing Then
+        Set rosterDf = Me
+        rosterKeyCol = rowKeyName
+    Else
+        Set rosterDf = MasterRowsDf
+        If Len(Trim$(MasterKeyColumn)) > 0 Then
+            rosterKeyCol = MasterRowsDf.ResolveColName(MasterKeyColumn)
+        Else
+            rosterKeyCol = MasterRowsDf.ResolveColName(rowKeyName)
+        End If
+    End If
+
+    ' Build output matrix schema
+    Dim resultDf As New cDataFrame
+    resultDf.AddColumn rowKeyName
+    For i = 1 To extraCount
+        resultDf.AddColumn extraCols(i)
+    Next i
+
+    Dim d As Long
+    For d = 1 To colDays
+        resultDf.AddColumn "D" & Format$(d, "00")
+    Next d
+    resultDf.AddColumn "Month Total"
+    resultDf.AddColumn "Daily Avg"
+
+    Dim rosterKeyObj As cColumn
+    Set rosterKeyObj = rosterDf.Column(rosterKeyCol)
+
+    Dim extraObjs() As cColumn
+    If extraCount > 0 Then
+        ReDim extraObjs(1 To extraCount)
+        For i = 1 To extraCount
+            Set extraObjs(i) = rosterDf.Column(extraCols(i))
+        Next i
+    End If
+
+    Dim seenKeys As Object
+    Set seenKeys = CreateObject("Scripting.Dictionary")
+    seenKeys.CompareMode = IIf(mCaseSensitive, 0, 1)
+
+    Dim totalOutCols As Long
+    totalOutCols = 1 + extraCount + colDays + 2
+
+    For r = 1 To rosterDf.RowCount
+        kStr = Trim$(CStr(rosterKeyObj.Item(r)))
+        If Len(kStr) > 0 And Not seenKeys.Exists(kStr) Then
+            seenKeys.Add kStr, True
+
+            Dim rowVals() As Variant
+            ReDim rowVals(0 To totalOutCols - 1)
+            rowVals(0) = kStr
+
+            For i = 1 To extraCount
+                rowVals(i) = extraObjs(i).Item(r)
+            Next i
+
+            Dim rowSum As Long
+            rowSum = 0
+            For d = 1 To colDays
+                If d <= daysInMonth Then
+                    cellKey = kStr & "|" & CStr(d)
+                    Dim cnt As Long
+                    If dayDict.Exists(cellKey) Then
+                        cnt = dayDict(cellKey)
+                    Else
+                        cnt = 0
+                    End If
+                    rowVals(extraCount + d) = cnt
+                    rowSum = rowSum + cnt
+                Else
+                    rowVals(extraCount + d) = ""
+                End If
+            Next d
+
+            rowVals(1 + extraCount + colDays) = rowSum
+            rowVals(2 + extraCount + colDays) = Round(CDbl(rowSum) / CDbl(daysInMonth), 1)
+            resultDf.AddRow rowVals
+        End If
+    Next r
+
+    Set BuildCalendarMatrix = resultDf
+End Function
+

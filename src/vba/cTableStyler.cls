@@ -1087,9 +1087,383 @@ Public Function SetGridlines(Optional ByVal Visible As Boolean = True) As cTable
     Set SetGridlines = Me
 End Function
 
+' Renders super-header group banners (using xlCenterAcrossSelection) above table columns.
+' GroupSpecs: array of Array(Label, StartColKey, EndColKey [, BgColor]).
+Public Function ApplyColumnGroupBanner(ByVal GroupSpecs As Variant, _
+                                       Optional ByVal HeaderRowOffset As Long = -1, _
+                                       Optional ByVal RowHeight As Double = 20#, _
+                                       Optional ByVal FontColor As Long = 16777215) As cTableStyler
+    If mTableRange Is Nothing Or mColumnCount = 0 Or Not IsArray(GroupSpecs) Then
+        Set ApplyColumnGroupBanner = Me
+        Exit Function
+    End If
+
+    Dim bannerRow As Long
+    bannerRow = mTopLeftCell.Row + HeaderRowOffset
+    If bannerRow < 1 Then
+        Set ApplyColumnGroupBanner = Me
+        Exit Function
+    End If
+
+    If RowHeight > 0# Then mWorksheet.Rows(bannerRow).RowHeight = RowHeight
+
+    Dim i As Long, idxNum As Long
+    idxNum = 0
+    For i = LBound(GroupSpecs) To UBound(GroupSpecs)
+        Dim spec As Variant
+        spec = GroupSpecs(i)
+        If IsArray(spec) Then
+            idxNum = idxNum + 1
+            Dim lb As Long, ub As Long
+            lb = LBound(spec)
+            ub = UBound(spec)
+            Dim lbl As String, cStart As Long, cEnd As Long, bgClr As Long
+            lbl = CStr(spec(lb))
+            cStart = ResolveColIndex(spec(lb + 1))
+            cEnd = ResolveColIndex(spec(lb + 2))
+            If ub >= lb + 3 Then
+                bgClr = CLng(spec(lb + 3))
+            Else
+                bgClr = IIf((idxNum Mod 2) = 1, RGB(30, 41, 59), RGB(51, 65, 85))
+            End If
+
+            If cStart >= 1 And cEnd >= cStart And cEnd <= mColumnCount Then
+                Dim absColStart As Long, absColEnd As Long
+                absColStart = mTopLeftCell.Column + cStart - 1
+                absColEnd = mTopLeftCell.Column + cEnd - 1
+                Dim grpRng As Object
+                Set grpRng = mWorksheet.Range(mWorksheet.Cells(bannerRow, absColStart), mWorksheet.Cells(bannerRow, absColEnd))
+                mWorksheet.Cells(bannerRow, absColStart).Value = lbl
+                grpRng.HorizontalAlignment = IIf(absColEnd > absColStart, 7, -4108) ' xlCenterAcrossSelection / xlCenter
+                grpRng.VerticalAlignment = -4108
+                grpRng.Font.Name = "Segoe UI"
+                grpRng.Font.Size = 9
+                grpRng.Font.Bold = True
+                grpRng.Font.Color = FontColor
+                grpRng.Interior.Color = bgClr
+                ApplyBoxBorders grpRng, 2, RGB(148, 163, 184)
+            End If
+        End If
+    Next i
+
+    Set ApplyColumnGroupBanner = Me
+End Function
+
+' Applies vertical xlMedium divider borders across column groups and subtle alternating fill on even groups.
+' GroupSpecs: array of Array(LabelOrUnused, StartColKey, EndColKey [, BgColor]).
+Public Function ApplyColumnGroupGrid(ByVal GroupSpecs As Variant, _
+                                     Optional ByVal SuperHeaderRowOffset As Long = -1, _
+                                     Optional ByVal DividerColor As Long = 6903111, _
+                                     Optional ByVal EvenGroupFillColor As Long = 16381425, _
+                                     Optional ByVal IncludeLeftEdge As Boolean = True) As cTableStyler
+    If mTableRange Is Nothing Or mColumnCount = 0 Or Not IsArray(GroupSpecs) Then
+        Set ApplyColumnGroupGrid = Me
+        Exit Function
+    End If
+
+    Const xlContinuous As Long = 1
+    Const xlMedium As Long = -4138
+    Const xlEdgeLeft As Long = 7
+    Const xlEdgeRight As Long = 10
+
+    Dim topRow As Long, bottomRow As Long
+    topRow = mTopLeftCell.Row + SuperHeaderRowOffset
+    If topRow < 1 Then topRow = mTopLeftCell.Row
+    bottomRow = mTopLeftCell.Row + IIf(mHasHeaders, 1, 0) + mRowCount - 1
+    Dim pureRows As Long
+    pureRows = PureDataRowCount()
+
+    Dim i As Long, grpNum As Long
+    grpNum = 0
+    For i = LBound(GroupSpecs) To UBound(GroupSpecs)
+        Dim spec As Variant
+        spec = GroupSpecs(i)
+        If IsArray(spec) Then
+            grpNum = grpNum + 1
+            Dim lb As Long
+            lb = LBound(spec)
+            Dim cStart As Long, cEnd As Long
+            cStart = ResolveColIndex(spec(lb + 1))
+            cEnd = ResolveColIndex(spec(lb + 2))
+            If cStart >= 1 And cEnd >= cStart And cEnd <= mColumnCount Then
+                Dim absColStart As Long, absColEnd As Long
+                absColStart = mTopLeftCell.Column + cStart - 1
+                absColEnd = mTopLeftCell.Column + cEnd - 1
+
+                If grpNum = 1 And IncludeLeftEdge Then
+                    Dim leftRng As Object
+                    Set leftRng = mWorksheet.Range(mWorksheet.Cells(topRow, absColStart), mWorksheet.Cells(bottomRow, absColStart))
+                    With leftRng.Borders(xlEdgeLeft)
+                        .LineStyle = xlContinuous
+                        .Weight = xlMedium
+                        .Color = DividerColor
+                    End With
+                End If
+
+                If (grpNum Mod 2) = 0 And pureRows > 0 And Not mDataBodyRange Is Nothing Then
+                    Dim bodyStartRow As Long
+                    bodyStartRow = mDataBodyRange.Row
+                    Dim fillRng As Object
+                    Set fillRng = mWorksheet.Range(mWorksheet.Cells(bodyStartRow, absColStart), mWorksheet.Cells(bodyStartRow + pureRows - 1, absColEnd))
+                    fillRng.Interior.Color = EvenGroupFillColor
+                End If
+
+                Dim rightRng As Object
+                Set rightRng = mWorksheet.Range(mWorksheet.Cells(topRow, absColEnd), mWorksheet.Cells(bottomRow, absColEnd))
+                With rightRng.Borders(xlEdgeRight)
+                    .LineStyle = xlContinuous
+                    .Weight = xlMedium
+                    .Color = DividerColor
+                End With
+            End If
+        End If
+    Next i
+
+    Set ApplyColumnGroupGrid = Me
+End Function
+
+' Convenience preset for monthly daily calendar grids (WEEK 1..W5 + SUMMARY, weekly borders, active highlights, unused day dimming).
+Public Function ApplyWeeklyCalendarGrid(ByVal FirstDayColKey As Variant, _
+                                        ByVal DaysInMonth As Long, _
+                                        Optional ByVal MaxDayCols As Long = 31, _
+                                        Optional ByVal SummaryStartColKey As Variant = Empty, _
+                                        Optional ByVal SummaryEndColKey As Variant = Empty, _
+                                        Optional ByVal SuperHeaderRowOffset As Long = -1) As cTableStyler
+    If mTableRange Is Nothing Or mColumnCount = 0 Or DaysInMonth < 1 Then
+        Set ApplyWeeklyCalendarGrid = Me
+        Exit Function
+    End If
+
+    Dim firstDayIdx As Long, lastActiveDayIdx As Long
+    firstDayIdx = ResolveColIndex(FirstDayColKey)
+    lastActiveDayIdx = firstDayIdx + DaysInMonth - 1
+    If lastActiveDayIdx > mColumnCount Then lastActiveDayIdx = mColumnCount
+
+    Dim pureRows As Long
+    pureRows = PureDataRowCount()
+
+    ' Center daily values and apply >=1 emerald highlight on active day columns
+    If pureRows > 0 And Not mDataBodyRange Is Nothing Then
+        Dim activeDataRng As Object
+        Set activeDataRng = mWorksheet.Range(mDataBodyRange.Cells(1, firstDayIdx), mDataBodyRange.Cells(pureRows, lastActiveDayIdx))
+        activeDataRng.HorizontalAlignment = -4108
+        activeDataRng.NumberFormat = "#,##0;-#,##0;""-"""
+
+        On Error Resume Next
+        activeDataRng.FormatConditions.Delete
+        Dim cf As Object
+        Set cf = activeDataRng.FormatConditions.Add(1, 5, "1") ' xlCellValue, xlGreaterEqual
+        If Not cf Is Nothing Then
+            cf.Interior.Color = RGB(220, 252, 231)
+            cf.Font.Color = RGB(22, 101, 52)
+            cf.Font.Bold = True
+        End If
+        On Error GoTo 0
+    End If
+
+    ' Center total row daily values
+    If mTotalRowHighlighted And Not mDataBodyRange Is Nothing Then
+        Dim totalDayRng As Object
+        Set totalDayRng = mWorksheet.Range(mDataBodyRange.Cells(mRowCount, firstDayIdx), mDataBodyRange.Cells(mRowCount, lastActiveDayIdx))
+        totalDayRng.HorizontalAlignment = -4108
+        totalDayRng.NumberFormat = "#,##0"
+    End If
+
+    ' Build week group descriptors (W1..W5)
+    Dim weekSpecs() As Variant
+    Dim specCount As Long
+    specCount = 0
+    Dim w As Long, wkStartDay As Long, wkEndDay As Long
+    For w = 1 To 5
+        wkStartDay = (w - 1) * 7 + 1
+        If wkStartDay <= DaysInMonth Then
+            wkEndDay = w * 7
+            If wkEndDay > DaysInMonth Then wkEndDay = DaysInMonth
+
+            Dim wkLabel As String
+            If (wkEndDay - wkStartDay + 1) >= 4 Then
+                wkLabel = "WEEK " & CStr(w) & " (D" & Format$(wkStartDay, "00") & "-D" & Format$(wkEndDay, "00") & ")"
+            ElseIf (wkEndDay - wkStartDay + 1) >= 2 Then
+                wkLabel = "W" & CStr(w) & " (" & Format$(wkStartDay, "00") & "-" & Format$(wkEndDay, "00") & ")"
+            Else
+                wkLabel = "W" & CStr(w)
+            End If
+
+            specCount = specCount + 1
+            ReDim Preserve weekSpecs(0 To specCount - 1)
+            weekSpecs(specCount - 1) = Array(wkLabel, firstDayIdx + wkStartDay - 1, firstDayIdx + wkEndDay - 1, _
+                                             IIf((w Mod 2) = 1, RGB(30, 41, 59), RGB(51, 65, 85)))
+        End If
+    Next w
+
+    If specCount > 0 Then
+        ApplyColumnGroupBanner weekSpecs, SuperHeaderRowOffset, 20#, RGB(255, 255, 255)
+        ApplyColumnGroupGrid weekSpecs, SuperHeaderRowOffset, RGB(71, 85, 105), RGB(241, 245, 249), True
+    End If
+
+    ' Dim trailing padded day columns if month has fewer days than MaxDayCols
+    If DaysInMonth < MaxDayCols Then
+        Dim padStartIdx As Long, padEndIdx As Long
+        padStartIdx = firstDayIdx + DaysInMonth
+        padEndIdx = firstDayIdx + MaxDayCols - 1
+        If padEndIdx > mColumnCount Then padEndIdx = mColumnCount
+        If padEndIdx >= padStartIdx Then
+            Dim padDividerRng As Object
+            Dim topPadRow As Long, botPadRow As Long
+            topPadRow = mTopLeftCell.Row + SuperHeaderRowOffset
+            If topPadRow < 1 Then topPadRow = mTopLeftCell.Row
+            botPadRow = mTopLeftCell.Row + IIf(mHasHeaders, 1, 0) + mRowCount - 1
+
+            DimColumns padStartIdx, padEndIdx, "-", RGB(226, 232, 240), RGB(148, 163, 184), SuperHeaderRowOffset
+            Set padDividerRng = mWorksheet.Range(mWorksheet.Cells(topPadRow, mTopLeftCell.Column + padEndIdx - 1), _
+                                                 mWorksheet.Cells(botPadRow, mTopLeftCell.Column + padEndIdx - 1))
+            With padDividerRng.Borders(10) ' xlEdgeRight
+                .LineStyle = 1
+                .Weight = -4138 ' xlMedium
+                .Color = RGB(71, 85, 105)
+            End With
+        End If
+    End If
+
+    ' Format optional Summary super-header & columns
+    If Not IsMissing(SummaryStartColKey) And Not IsEmpty(SummaryStartColKey) Then
+        Dim sumStartIdx As Long, sumEndIdx As Long
+        sumStartIdx = ResolveColIndex(SummaryStartColKey)
+        If IsMissing(SummaryEndColKey) Or IsEmpty(SummaryEndColKey) Then
+            sumEndIdx = sumStartIdx
+        Else
+            sumEndIdx = ResolveColIndex(SummaryEndColKey)
+        End If
+        Dim sumSpec(0 To 0) As Variant
+        sumSpec(0) = Array("SUMMARY", sumStartIdx, sumEndIdx, RGB(15, 23, 42))
+        ApplyColumnGroupBanner sumSpec, SuperHeaderRowOffset, 20#, RGB(255, 255, 255)
+
+        If Not mDataBodyRange Is Nothing Then
+            mDataBodyRange.Columns(sumStartIdx).NumberFormat = "#,##0"
+            mDataBodyRange.Columns(sumStartIdx).Font.Bold = True
+            If sumEndIdx > sumStartIdx Then
+                mDataBodyRange.Columns(sumEndIdx).NumberFormat = "0.0"
+            End If
+        End If
+    End If
+
+    Set ApplyWeeklyCalendarGrid = Me
+End Function
+
+' Spotlights a specific column (e.g., Today) with distinct header fill, body tint, and medium vertical borders.
+Public Function SpotlightColumn(ByVal ColumnKey As Variant, _
+                                Optional ByVal HeaderBgColor As Long = 423897, _
+                                Optional ByVal BodyBgColor As Long = 13104382, _
+                                Optional ByVal BorderColor As Long = 423897, _
+                                Optional ByVal HeaderFontColor As Long = 16777215) As cTableStyler
+    If mTableRange Is Nothing Or mColumnCount = 0 Then
+        Set SpotlightColumn = Me
+        Exit Function
+    End If
+
+    Dim cIdx As Long
+    cIdx = ResolveColIndex(ColumnKey)
+    If cIdx < 1 Or cIdx > mColumnCount Then
+        Set SpotlightColumn = Me
+        Exit Function
+    End If
+
+    If Not mHeaderRange Is Nothing Then
+        With mHeaderRange.Cells(1, cIdx)
+            .Interior.Color = HeaderBgColor
+            .Font.Color = HeaderFontColor
+            .Font.Bold = True
+        End With
+    End If
+
+    Dim pureRows As Long
+    pureRows = PureDataRowCount()
+    If pureRows > 0 And Not mDataBodyRange Is Nothing Then
+        Dim bodyRng As Object
+        Set bodyRng = mWorksheet.Range(mDataBodyRange.Cells(1, cIdx), mDataBodyRange.Cells(pureRows, cIdx))
+        bodyRng.Interior.Color = BodyBgColor
+    End If
+
+    Dim fullColRng As Object
+    Set fullColRng = mTableRange.Columns(cIdx)
+    With fullColRng.Borders(7) ' xlEdgeLeft
+        .LineStyle = 1
+        .Weight = -4138 ' xlMedium
+        .Color = BorderColor
+    End With
+    With fullColRng.Borders(10) ' xlEdgeRight
+        .LineStyle = 1
+        .Weight = -4138 ' xlMedium
+        .Color = BorderColor
+    End With
+
+    Set SpotlightColumn = Me
+End Function
+
+' Dims trailing or inactive columns (across optional super-header, header, data, and total row).
+Public Function DimColumns(ByVal FromColKey As Variant, _
+                           ByVal ToColKey As Variant, _
+                           Optional ByVal PlaceholderText As String = "-", _
+                           Optional ByVal BgColor As Long = 15788258, _
+                           Optional ByVal FontColor As Long = 12100498, _
+                           Optional ByVal SuperHeaderRowOffset As Long = -1) As cTableStyler
+    If mTableRange Is Nothing Or mColumnCount = 0 Then
+        Set DimColumns = Me
+        Exit Function
+    End If
+
+    Dim cFrom As Long, cTo As Long
+    cFrom = ResolveColIndex(FromColKey)
+    cTo = ResolveColIndex(ToColKey)
+    If cFrom < 1 Or cTo < cFrom Or cTo > mColumnCount Then
+        Set DimColumns = Me
+        Exit Function
+    End If
+
+    Dim absFrom As Long, absTo As Long
+    absFrom = mTopLeftCell.Column + cFrom - 1
+    absTo = mTopLeftCell.Column + cTo - 1
+
+    Dim topRow As Long, bottomRow As Long
+    topRow = mTopLeftCell.Row + SuperHeaderRowOffset
+    If topRow < 1 Then topRow = mTopLeftCell.Row
+    bottomRow = mTopLeftCell.Row + IIf(mHasHeaders, 1, 0) + mRowCount - 1
+
+    Dim dimRng As Object
+    Set dimRng = mWorksheet.Range(mWorksheet.Cells(topRow, absFrom), mWorksheet.Cells(bottomRow, absTo))
+    dimRng.Interior.Color = BgColor
+    dimRng.Font.Color = FontColor
+    dimRng.HorizontalAlignment = -4108
+
+    If Len(PlaceholderText) > 0 And Not mDataBodyRange Is Nothing Then
+        mWorksheet.Range(mDataBodyRange.Cells(1, cFrom), mDataBodyRange.Cells(mRowCount, cTo)).Value = PlaceholderText
+    End If
+
+    Set DimColumns = Me
+End Function
+
 ' ------------------------------------------------------------------------------
 ' Internal Helpers
 ' ------------------------------------------------------------------------------
+
+Private Function PureDataRowCount() As Long
+    If mTotalRowHighlighted And mRowCount > 0 Then
+        PureDataRowCount = mRowCount - 1
+    Else
+        PureDataRowCount = mRowCount
+    End If
+End Function
+
+Private Sub ApplyBoxBorders(ByVal Rng As Object, ByVal Weight As Long, ByVal BorderColor As Long)
+    Dim b As Variant
+    For Each b In Array(7, 8, 9, 10) ' Left, Top, Bottom, Right
+        With Rng.Borders(CLng(b))
+            .LineStyle = 1
+            .Weight = Weight
+            .Color = BorderColor
+        End With
+    Next b
+End Sub
 
 Private Function ResolveColIndex(ByVal ColumnKey As Variant) As Long
     If VarType(ColumnKey) = vbString Then

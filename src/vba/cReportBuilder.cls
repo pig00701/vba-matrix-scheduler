@@ -55,6 +55,9 @@ Private mCurrentRow As Long
 Private mMaxCol As Long
 Private mInitialTopLeft As Object
 Private mWarnings As Collection
+Private mLastTableStyler As cTableStyler
+Private mLastTableStartRow As Long
+Private mLastTableEndRow As Long
 
 ' Rollback snapshot state
 Private mSnapshotRow As Long
@@ -89,6 +92,9 @@ Private Sub Class_Initialize()
     mPrevCalculation = -4105 ' xlCalculationAutomatic
     mPrevEnableEvents = True
     mPrevDisplayAlerts = True
+    mLastTableStartRow = 0
+    mLastTableEndRow = 0
+    Set mLastTableStyler = Nothing
     Set mWarnings = New Collection
 End Sub
 
@@ -96,6 +102,7 @@ Private Sub Class_Terminate()
     If mInBatch Then
         EndUpdate
     End If
+    Set mLastTableStyler = Nothing
     Set mWorksheet = Nothing
     Set mInitialTopLeft = Nothing
     Set mWarnings = Nothing
@@ -139,6 +146,9 @@ Public Function Attach(ByVal TargetWorksheet As Object, _
     mGroupStartRow = mStartRow
     mGroupMaxRow = mStartRow
     mGroupAnchorCol = mStartCol
+    mLastTableStartRow = 0
+    mLastTableEndRow = 0
+    Set mLastTableStyler = Nothing
     Set mWarnings = New Collection
 
     Set Attach = Me
@@ -562,6 +572,9 @@ Public Function AddTable(ByVal Df As cDataFrame, _
     End If
 
     ' Advance current row (table + one blank gap row)
+    Set mLastTableStyler = styler
+    mLastTableStartRow = headerRow
+    mLastTableEndRow = lastRow
     mCurrentRow = lastRow + 2
 
     Set AddTable = Me
@@ -641,6 +654,180 @@ Public Function AddValidationSummary(ByVal Validator As cDataValidator, _
     End If
 
     Set AddValidationSummary = Me
+End Function
+
+' Renders a full-width dark/colored section bar in the flowing layout, with optional workbook named anchor.
+Public Function AddSectionHeader(ByVal Title As String, _
+                                 Optional ByVal Theme As String = "Slate", _
+                                 Optional ByVal WidthColumns As Long = 0, _
+                                 Optional ByVal AnchorName As String = "", _
+                                 Optional ByVal CustomBgColor As Variant) As cReportBuilder
+    CheckAttached "AddSectionHeader"
+
+    Dim secBg As Long, secFg As Long, dummySubBg As Long, dummySubFg As Long
+    ResolveBannerTheme Theme, secBg, secFg, dummySubBg, dummySubFg
+    If Not IsMissing(CustomBgColor) And Not IsEmpty(CustomBgColor) Then
+        If IsNumeric(CustomBgColor) Then secBg = CLng(CustomBgColor)
+    End If
+
+    If WidthColumns <= 0 Then
+        If mMaxCol > mStartCol Then
+            WidthColumns = mMaxCol - mStartCol + 1
+        Else
+            WidthColumns = 8
+        End If
+    End If
+
+    Dim endCol As Long, secRow As Long
+    endCol = mStartCol + WidthColumns - 1
+    secRow = mCurrentRow
+    RequireColumns endCol, "AddSectionHeader"
+    RequireRows secRow, "AddSectionHeader"
+
+    If endCol > mMaxCol Then mMaxCol = endCol
+
+    Dim secRng As Object
+    Set secRng = mWorksheet.Range(mWorksheet.Cells(secRow, mStartCol), mWorksheet.Cells(secRow, endCol))
+    PutValue mWorksheet.Cells(secRow, mStartCol), Title
+    secRng.Interior.Color = secBg
+    secRng.Font.Name = "Segoe UI"
+    secRng.Font.Size = 11
+    secRng.Font.Bold = True
+    secRng.Font.Color = secFg
+    secRng.VerticalAlignment = XL_CENTER
+    mWorksheet.Rows(secRow).RowHeight = 25
+
+    If Len(Trim$(AnchorName)) > 0 Then
+        On Error Resume Next
+        mWorksheet.Parent.Names.Add Name:=Trim$(AnchorName), RefersTo:=mWorksheet.Cells(secRow, mStartCol)
+        On Error GoTo 0
+    End If
+
+    mCurrentRow = secRow + 1
+    Set AddSectionHeader = Me
+End Function
+
+' Renders clickable same-sheet or workbook navigation pills at mCurrentRow (or populates a reserved TargetRow).
+Public Function AddQuickJumpBar(ByVal LabelText As String, _
+                                ByVal PillLabels As Variant, _
+                                ByVal SubAddresses As Variant, _
+                                Optional ByVal ActiveIndex As Long = 0, _
+                                Optional ByVal PillWidthCols As Long = 2, _
+                                Optional ByVal TargetRow As Long = 0) As cReportBuilder
+    CheckAttached "AddQuickJumpBar"
+    If Not IsArray(PillLabels) Or Not IsArray(SubAddresses) Then
+        Err.Raise 5, SRC & ".AddQuickJumpBar", "PillLabels and SubAddresses must be arrays."
+    End If
+
+    Dim lbL As Long, ubL As Long, lbS As Long, ubS As Long
+    lbL = LBound(PillLabels): ubL = UBound(PillLabels)
+    lbS = LBound(SubAddresses): ubS = UBound(SubAddresses)
+    Dim nPills As Long
+    nPills = ubL - lbL + 1
+    If (ubS - lbS + 1) <> nPills Then
+        Err.Raise 5, SRC & ".AddQuickJumpBar", "PillLabels and SubAddresses must have the same length."
+    End If
+    If PillWidthCols < 1 Then PillWidthCols = 1
+
+    Dim barRow As Long
+    barRow = IIf(TargetRow > 0, TargetRow, mCurrentRow)
+    Dim pillStartCol As Long
+    pillStartCol = mStartCol + 2
+    Dim endCol As Long
+    endCol = pillStartCol + (nPills * PillWidthCols) - 1
+    RequireColumns endCol, "AddQuickJumpBar"
+    RequireRows barRow, "AddQuickJumpBar"
+    If endCol > mMaxCol Then mMaxCol = endCol
+
+    mWorksheet.Rows(barRow).RowHeight = 22
+    If Len(Trim$(LabelText)) > 0 Then
+        PutValue mWorksheet.Cells(barRow, mStartCol), LabelText
+        With mWorksheet.Cells(barRow, mStartCol)
+            .Font.Name = "Segoe UI"
+            .Font.Size = 10
+            .Font.Bold = True
+            .Font.Color = RGB(30, 41, 59)
+            .VerticalAlignment = XL_CENTER
+        End With
+    End If
+
+    Dim k As Long, colIdx As Long, b As Variant
+    For k = 0 To nPills - 1
+        colIdx = pillStartCol + (k * PillWidthCols)
+        Dim pillRng As Object
+        Set pillRng = mWorksheet.Range(mWorksheet.Cells(barRow, colIdx), mWorksheet.Cells(barRow, colIdx + PillWidthCols - 1))
+        mWorksheet.Cells(barRow, colIdx).NumberFormat = XL_TEXT_FORMAT
+
+        mWorksheet.Hyperlinks.Add Anchor:=mWorksheet.Cells(barRow, colIdx), _
+                                  Address:="", _
+                                  SubAddress:=CStr(SubAddresses(lbS + k)), _
+                                  TextToDisplay:=CStr(PillLabels(lbL + k))
+
+        pillRng.HorizontalAlignment = IIf(PillWidthCols > 1, 7, XL_CENTER)
+        pillRng.VerticalAlignment = XL_CENTER
+        pillRng.Font.Name = "Segoe UI"
+        pillRng.Font.Size = 9.5
+        pillRng.Font.Bold = True
+
+        If (k + 1) = ActiveIndex Then
+            pillRng.Interior.Color = RGB(217, 119, 6)
+            pillRng.Font.Color = RGB(255, 255, 255)
+        Else
+            pillRng.Interior.Color = RGB(226, 232, 240)
+            pillRng.Font.Color = RGB(15, 23, 42)
+        End If
+
+        For Each b In Array(XL_EDGE_LEFT, XL_EDGE_TOP, XL_EDGE_BOTTOM, XL_EDGE_RIGHT)
+            With pillRng.Borders(CLng(b))
+                .LineStyle = XL_CONTINUOUS
+                .Weight = XL_THIN
+                .Color = RGB(148, 163, 184)
+            End With
+        Next b
+    Next k
+
+    If TargetRow <= 0 Then
+        mCurrentRow = barRow + 2
+    End If
+    Set AddQuickJumpBar = Me
+End Function
+
+' Idempotently creates or updates an xlFreeFloating Form Button macro trigger on the report sheet.
+Public Function AddActionButton(ByVal ButtonName As String, _
+                                ByVal Caption As String, _
+                                ByVal OnActionMacro As String, _
+                                Optional ByVal TargetCol As Variant = 30, _
+                                Optional ByVal TargetRow As Long = 0, _
+                                Optional ByVal WidthPts As Double = 175#, _
+                                Optional ByVal HeightPts As Double = 25#) As cReportBuilder
+    CheckAttached "AddActionButton"
+    Dim useRow As Long
+    useRow = IIf(TargetRow > 0, TargetRow, mCurrentRow)
+    RequireRows useRow, "AddActionButton"
+
+    Dim btnLeft As Double, btnTop As Double
+    btnLeft = mWorksheet.Columns(TargetCol).Left
+    btnTop = mWorksheet.Rows(useRow).Top - 2#
+
+    Dim btn As Object
+    On Error Resume Next
+    Set btn = mWorksheet.Buttons(ButtonName)
+    On Error GoTo 0
+
+    If btn Is Nothing Then
+        Set btn = mWorksheet.Buttons.Add(btnLeft, btnTop, WidthPts, HeightPts)
+        btn.Name = ButtonName
+        btn.Placement = 3 ' xlFreeFloating
+    Else
+        btn.Left = btnLeft
+        btn.Top = btnTop
+        btn.Width = WidthPts
+        btn.Height = HeightPts
+    End If
+    btn.Text = Caption
+    btn.OnAction = OnActionMacro
+
+    Set AddActionButton = Me
 End Function
 
 ' Adds vertical blank spacing
@@ -795,6 +982,9 @@ Public Function Clear() As cReportBuilder
     mGroupStartRow = mStartRow
     mGroupMaxRow = mStartRow
     mGroupAnchorCol = mStartCol
+    mLastTableStartRow = 0
+    mLastTableEndRow = 0
+    Set mLastTableStyler = Nothing
     Set mWarnings = New Collection
     Set Clear = Me
 End Function
@@ -1077,6 +1267,18 @@ End Property
 
 Public Property Get MaxCol() As Long
     MaxCol = mMaxCol
+End Property
+
+Public Property Get LastTableStyler() As cTableStyler
+    Set LastTableStyler = mLastTableStyler
+End Property
+
+Public Property Get LastTableStartRow() As Long
+    LastTableStartRow = mLastTableStartRow
+End Property
+
+Public Property Get LastTableEndRow() As Long
+    LastTableEndRow = mLastTableEndRow
 End Property
 
 ' Non-fatal findings recorded while building (truncated text, skipped total row, ...)
