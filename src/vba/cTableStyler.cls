@@ -794,6 +794,145 @@ Public Function SetAllColumnWidths(ByVal Width As Double) As cTableStyler
     Set SetAllColumnWidths = Me
 End Function
 
+' Hides or unhides specific table columns by key or pattern (e.g. "D06,D07" or "*Notes*").
+Public Function HideColumn(ByVal ColumnKeyOrPattern As Variant, _
+                           Optional ByVal IsHidden As Boolean = True) As cTableStyler
+    If mTableRange Is Nothing Or mColumnCount = 0 Then
+        Set HideColumn = Me
+        Exit Function
+    End If
+
+    Dim colIndices() As Long
+    colIndices = ResolveColIndices(ColumnKeyOrPattern)
+    Dim i As Long, cIdx As Long
+    For i = LBound(colIndices) To UBound(colIndices)
+        cIdx = colIndices(i)
+        If cIdx >= 1 And cIdx <= mColumnCount Then
+            mTableRange.Columns(cIdx).EntireColumn.Hidden = IsHidden
+        End If
+    Next i
+
+    Set HideColumn = Me
+End Function
+
+' Highlights entire row when cell condition in ColumnKey is satisfied.
+Public Function HighlightRowCondition(ByVal ColumnKey As Variant, _
+                                      ByVal Op As String, _
+                                      ByVal Val As Variant, _
+                                      Optional ByVal FillColor As Long = 13561798, _
+                                      Optional ByVal FontColor As Long = 1875718, _
+                                      Optional ByVal Bold As Boolean = False) As cTableStyler
+    If mDataBodyRange Is Nothing Or mColumnCount = 0 Then
+        Set HighlightRowCondition = Me
+        Exit Function
+    End If
+
+    Dim cIdx As Long
+    cIdx = ResolveColIndex(ColumnKey)
+    If cIdx < 1 Or cIdx > mColumnCount Then
+        Set HighlightRowCondition = Me
+        Exit Function
+    End If
+
+    Dim colLetter As String
+    colLetter = ColLetterFromIndex(mTopLeftCell.Column + cIdx - 1)
+    Dim firstRow As Long
+    firstRow = mDataBodyRange.Row
+
+    Dim fmla As String
+    Dim valStr As String
+    If IsNumeric(Val) Then
+        valStr = CStr(Val)
+    Else
+        valStr = """" & Replace(CStr(Val), """", """""") & """"
+    End If
+
+    Select Case UCase$(Trim$(Op))
+        Case "=", "==", "EQUALS": fmla = "=$" & colLetter & firstRow & "=" & valStr
+        Case "<>", "!=", "NOT_EQUALS": fmla = "=$" & colLetter & firstRow & "<>" & valStr
+        Case ">", "GREATER": fmla = "=$" & colLetter & firstRow & ">" & valStr
+        Case ">=", "GREATER_OR_EQUAL": fmla = "=$" & colLetter & firstRow & ">=" & valStr
+        Case "<", "LESS": fmla = "=$" & colLetter & firstRow & "<" & valStr
+        Case "<=", "LESS_OR_EQUAL": fmla = "=$" & colLetter & firstRow & "<=" & valStr
+        Case Else: fmla = "=$" & colLetter & firstRow & "=" & valStr
+    End Select
+
+    On Error Resume Next
+    Dim fc As Object
+    ' xlExpression = 2
+    Set fc = mDataBodyRange.FormatConditions.Add(2, , fmla)
+    If Not fc Is Nothing Then
+        If FillColor >= 0 Then fc.Interior.Color = FillColor
+        If FontColor >= 0 Then fc.Font.Color = FontColor
+        If Bold Then fc.Font.Bold = True
+    End If
+    On Error GoTo 0
+
+    Set HighlightRowCondition = Me
+End Function
+
+' Adds an Excel In-Cell Data Bar to a column.
+Public Function ApplyDataBars(ByVal ColumnKey As Variant, _
+                              Optional ByVal BarColor As Long = 15773696) As cTableStyler
+    If mDataBodyRange Is Nothing Or mColumnCount = 0 Then
+        Set ApplyDataBars = Me
+        Exit Function
+    End If
+
+    Dim cIdx As Long
+    cIdx = ResolveColIndex(ColumnKey)
+    If cIdx < 1 Or cIdx > mColumnCount Then
+        Set ApplyDataBars = Me
+        Exit Function
+    End If
+
+    Dim colRng As Object
+    Set colRng = mDataBodyRange.Columns(cIdx)
+
+    On Error Resume Next
+    Dim db As Object
+    ' xlDatabar = 4
+    Set db = colRng.FormatConditions.AddDatabar
+    If Not db Is Nothing Then
+        db.BarColor.Color = BarColor
+    End If
+    On Error GoTo 0
+
+    Set ApplyDataBars = Me
+End Function
+
+' Adds a 2-color gradient Color Scale across a column (e.g. Min to Max heatmap).
+Public Function ApplyColorScale(ByVal ColumnKey As Variant, _
+                                Optional ByVal MinColor As Long = 16777215, _
+                                Optional ByVal MaxColor As Long = 13561798) As cTableStyler
+    If mDataBodyRange Is Nothing Or mColumnCount = 0 Then
+        Set ApplyColorScale = Me
+        Exit Function
+    End If
+
+    Dim cIdx As Long
+    cIdx = ResolveColIndex(ColumnKey)
+    If cIdx < 1 Or cIdx > mColumnCount Then
+        Set ApplyColorScale = Me
+        Exit Function
+    End If
+
+    Dim colRng As Object
+    Set colRng = mDataBodyRange.Columns(cIdx)
+
+    On Error Resume Next
+    Dim cs As Object
+    ' xlColorScale = 3
+    Set cs = colRng.FormatConditions.AddColorScale(2)
+    If Not cs Is Nothing Then
+        If MinColor >= 0 Then cs.ColorScaleCriteria(1).FormatColor.Color = MinColor
+        If MaxColor >= 0 Then cs.ColorScaleCriteria(2).FormatColor.Color = MaxColor
+    End If
+    On Error GoTo 0
+
+    Set ApplyColorScale = Me
+End Function
+
 ' Sets row height specifically on the header row in 1 COM call.
 Public Function SetHeaderRowHeight(ByVal Height As Double) As cTableStyler
     If Not mHeaderRange Is Nothing And Height > 0# Then
@@ -1442,9 +1581,317 @@ Public Function DimColumns(ByVal FromColKey As Variant, _
     Set DimColumns = Me
 End Function
 
+' Applies styling rules read from an Excel Table (ListObject or Table Name), Range, or cDataFrame.
+' Supported columns (case-insensitive): RuleType/Action/Type, Target/Column/ColumnKey,
+' Value/Param/Format, Operator/Op, FillColor/BgColor, FontColor/TextColor, Scope/Section, Enabled.
+Public Function ApplyStyleFromTable(ByVal StyleTableOrDf As Variant, _
+                                     Optional ByVal TargetScope As String = "") As cTableStyler
+    If mTableRange Is Nothing Or mColumnCount = 0 Then
+        Set ApplyStyleFromTable = Me
+        Exit Function
+    End If
+
+    Dim cfgDf As cDataFrame
+    Set cfgDf = ResolveStyleConfigDf(StyleTableOrDf)
+    If cfgDf.RowCount = 0 Then
+        Set ApplyStyleFromTable = Me
+        Exit Function
+    End If
+
+    Dim ruleCol As String, targetCol As String, valCol As String
+    Dim opCol As String, fillCol As String, fontCol As String, enabledCol As String, scopeCol As String
+    ruleCol = FindStyleColName(cfgDf, Array("RuleType", "Action", "Type", "Rule"))
+    If Len(ruleCol) = 0 Then
+        Err.Raise 5, "cTableStyler.ApplyStyleFromTable", "Style table requires a 'RuleType' (or 'Action'/'Type') column."
+    End If
+
+    targetCol = FindStyleColName(cfgDf, Array("Target", "Column", "ColumnKey", "Columns"))
+    valCol = FindStyleColName(cfgDf, Array("Value", "Param", "Param1", "Format", "StyleValue"))
+    opCol = FindStyleColName(cfgDf, Array("Operator", "Op", "Condition", "Param2"))
+    fillCol = FindStyleColName(cfgDf, Array("FillColor", "BgColor", "Background", "Fill"))
+    fontCol = FindStyleColName(cfgDf, Array("FontColor", "TextColor", "Color"))
+    enabledCol = FindStyleColName(cfgDf, Array("Enabled", "Active", "IsEnabled"))
+    scopeCol = FindStyleColName(cfgDf, Array("Scope", "Section", "TargetTable", "TableScope"))
+
+    Dim r As Long
+    For r = 1 To cfgDf.RowCount
+        If Len(enabledCol) > 0 Then
+            If Not ParseStyleBool(cfgDf.Item(r, enabledCol), True) Then GoTo NextStyleRow
+        End If
+
+        ' Filter by Scope if specified
+        If Len(scopeCol) > 0 And Len(TargetScope) > 0 Then
+            Dim rowScope As String
+            rowScope = UCase$(Trim$(CStr(cfgDf.Item(r, scopeCol))))
+            If Len(rowScope) > 0 And rowScope <> "ALL" And rowScope <> "*" Then
+                If StrComp(rowScope, UCase$(Trim$(TargetScope)), vbTextCompare) <> 0 Then
+                    GoTo NextStyleRow
+                End If
+            End If
+        End If
+
+        Dim ruleType As String
+        ruleType = UCase$(Trim$(CStr(cfgDf.Item(r, ruleCol))))
+        If Len(ruleType) = 0 Then GoTo NextStyleRow
+
+        Dim targetVal As String, paramVal As String, opVal As String
+        If Len(targetCol) > 0 Then targetVal = Trim$(CStr(cfgDf.Item(r, targetCol))) Else targetVal = ""
+        If Len(valCol) > 0 Then paramVal = Trim$(CStr(cfgDf.Item(r, valCol))) Else paramVal = ""
+        If Len(opCol) > 0 Then opVal = Trim$(CStr(cfgDf.Item(r, opCol))) Else opVal = ""
+
+        Dim fillClr As Long, fontClr As Long
+        If Len(fillCol) > 0 Then fillClr = ParseStyleColor(cfgDf.Item(r, fillCol), -1) Else fillClr = -1
+        If Len(fontCol) > 0 Then fontClr = ParseStyleColor(cfgDf.Item(r, fontCol), -1) Else fontClr = -1
+
+        Select Case ruleType
+            Case "THEME"
+                Dim thmName As String
+                thmName = IIf(Len(paramVal) > 0, paramVal, targetVal)
+                If Len(thmName) > 0 Then Me.ApplyTheme thmName
+            Case "FONT"
+                Dim fntName As String
+                fntName = IIf(Len(paramVal) > 0, paramVal, targetVal)
+                If Len(fntName) > 0 Then Me.SetFont fntName
+            Case "ZEBRA", "ZEBRASTRIPES"
+                If fillClr >= 0 Then Me.ApplyZebraStripes fillClr Else Me.ApplyZebraStripes
+            Case "BORDERS"
+                If fillClr >= 0 Then Me.ApplyBorders fillClr Else Me.ApplyBorders
+            Case "OUTERBORDER", "BOXBORDER"
+                Dim boxClr As Long
+                boxClr = IIf(fillClr >= 0, fillClr, IIf(fontClr >= 0, fontClr, 14277081))
+                Dim boxWt As Long
+                Dim bVal As String
+                bVal = UCase$(Trim$(IIf(Len(targetVal) > 0 And Not IsNumeric(targetVal), targetVal, paramVal)))
+                Select Case bVal
+                    Case "THICK": boxWt = 4& ' xlThick
+                    Case "MEDIUM": boxWt = -4138 ' xlMedium
+                    Case "HAIRLINE": boxWt = 1& ' xlHairline
+                    Case Else
+                        If IsNumeric(bVal) Then boxWt = CLng(bVal) Else boxWt = 2& ' xlThin
+                End Select
+                ApplyBoxBorders mTableRange, boxWt, boxClr
+            Case "FREEZE", "FREEZEPANES"
+                Dim frzR As Long, frzC As Long
+                frzR = IIf(IsNumeric(paramVal), CLng(paramVal), 1&)
+                frzC = IIf(IsNumeric(opVal), CLng(opVal), 0&)
+                Me.FreezePanes frzR, frzC
+            Case "GRIDLINES"
+                Me.SetGridlines ParseStyleBool(paramVal, True)
+            Case "FORMAT", "NUMBERFORMAT"
+                If Len(targetVal) > 0 And Len(paramVal) > 0 Then Me.FormatColumns targetVal, paramVal
+            Case "ALIGN", "ALIGNMENT"
+                If Len(targetVal) > 0 And Len(paramVal) > 0 Then Me.AlignColumn targetVal, ParseAlignCode(paramVal)
+            Case "WIDTH", "COLWIDTH"
+                If Len(targetVal) > 0 And IsNumeric(paramVal) Then Me.SetColumnWidth targetVal, CDbl(paramVal)
+            Case "UNIFORMWIDTH"
+                If Len(targetVal) > 0 And IsNumeric(paramVal) Then Me.SetUniformColumnWidth targetVal, CDbl(paramVal)
+            Case "WRAP", "WRAPTEXT"
+                If Len(targetVal) > 0 Then Me.SetWrapText targetVal, ParseStyleBool(paramVal, True)
+            Case "HEADERHEIGHT"
+                If IsNumeric(paramVal) Then Me.SetHeaderRowHeight CDbl(paramVal)
+            Case "ROWHEIGHT", "DATAROWHEIGHT"
+                If IsNumeric(paramVal) Then Me.SetDataRowHeight CDbl(paramVal)
+            Case "HIDE", "HIDDEN", "HIDECOLUMN"
+                If Len(targetVal) > 0 Then Me.HideColumn targetVal, True
+            Case "SHOW", "UNHIDE"
+                If Len(targetVal) > 0 Then Me.HideColumn targetVal, False
+            Case "HIGHLIGHT", "HIGHLIGHTVALUES"
+                If Len(targetVal) > 0 Then
+                    Me.HighlightValues targetVal, paramVal, _
+                        IIf(fillClr >= 0, fillClr, 13561798), _
+                        IIf(fontClr >= 0, fontClr, 1875718)
+                End If
+            Case "HIGHLIGHTCOND", "HIGHLIGHTCONDITION"
+                If Len(targetVal) > 0 And Len(opVal) > 0 Then
+                    Me.HighlightCondition targetVal, opVal, paramVal, _
+                        IIf(fillClr >= 0, fillClr, 13561798), _
+                        IIf(fontClr >= 0, fontClr, 1875718)
+                End If
+            Case "HIGHLIGHTROW"
+                If Len(targetVal) > 0 And Len(opVal) > 0 Then
+                    Me.HighlightRowCondition targetVal, opVal, paramVal, _
+                        IIf(fillClr >= 0, fillClr, 13561798), _
+                        IIf(fontClr >= 0, fontClr, 1875718)
+                End If
+            Case "COLORSCALE"
+                If Len(targetVal) > 0 Then
+                    Me.ApplyColorScale targetVal, fillClr, fontClr
+                End If
+            Case "DATABAR", "DATABARS"
+                If Len(targetVal) > 0 Then
+                    Me.ApplyDataBars targetVal, IIf(fillClr >= 0, fillClr, RGB(99, 102, 241))
+                End If
+            Case "SPOTLIGHT"
+                If Len(targetVal) > 0 Then
+                    Me.SpotlightColumn targetVal, _
+                        IIf(fillClr >= 0, fillClr, 16772566), _
+                        IIf(fontClr >= 0, fontClr, 9453854)
+                End If
+            Case "DIM", "DIMCOLUMNS"
+                If Len(targetVal) > 0 And Len(opVal) > 0 Then
+                    Me.DimColumns targetVal, opVal, IIf(Len(paramVal) > 0, paramVal, "-"), _
+                        IIf(fillClr >= 0, fillClr, 15788258), _
+                        IIf(fontClr >= 0, fontClr, 12100498)
+                End If
+            Case "WEEKLYGRID", "WEEKLYCALENDARGRID"
+                Dim daysInM As Long, maxDayC As Long
+                daysInM = IIf(IsNumeric(paramVal), CLng(paramVal), 31&)
+                maxDayC = IIf(IsNumeric(opVal), CLng(opVal), 31&)
+                If Len(targetVal) > 0 Then
+                    Me.ApplyWeeklyCalendarGrid targetVal, daysInM, maxDayC
+                End If
+            Case "GROUPGRID", "COLUMNGROUPGRID"
+                If Len(targetVal) > 0 And Len(opVal) > 0 Then
+                    Dim gSpec(0 To 0) As Variant
+                    gSpec(0) = Array(paramVal, targetVal, opVal)
+                    Me.ApplyColumnGroupGrid gSpec, -1, _
+                        IIf(fontClr >= 0, fontClr, 6903111), _
+                        IIf(fillClr >= 0, fillClr, 16381425), True
+                End If
+            Case "GROUPBANNER", "SUPERHEADER"
+                If Len(targetVal) > 0 And Len(opVal) > 0 Then
+                    Dim bSpec(0 To 0) As Variant
+                    bSpec(0) = Array(paramVal, targetVal, opVal, IIf(fillClr >= 0, fillClr, RGB(30, 41, 59)))
+                    Me.ApplyColumnGroupBanner bSpec, -1, 20#, IIf(fontClr >= 0, fontClr, 16777215)
+                End If
+            Case "TOTALROW", "ADDTOTALROW"
+                If Len(targetVal) > 0 Then
+                    Me.AddTotalRow targetVal, IIf(Len(paramVal) > 0, paramVal, "Total")
+                Else
+                    Me.AddTotalRow
+                End If
+            Case "AUTOFIT"
+                Me.AutoFitColumns IIf(IsNumeric(paramVal), CDbl(paramVal), 3#)
+        End Select
+NextStyleRow:
+    Next r
+
+    Set ApplyStyleFromTable = Me
+End Function
+
 ' ------------------------------------------------------------------------------
 ' Internal Helpers
 ' ------------------------------------------------------------------------------
+
+Private Function ResolveStyleConfigDf(ByVal Source As Variant) As cDataFrame
+    Dim df As New cDataFrame
+
+    If VarType(Source) = vbString Then
+        Dim strName As String
+        strName = Trim$(CStr(Source))
+        If Len(strName) = 0 Then
+            Err.Raise 5, "cTableStyler.ApplyStyleFromTable", "TableName string cannot be blank."
+        End If
+        If Not mWorksheet Is Nothing Then
+            df.LoadFromTableName mWorksheet, strName
+        Else
+            df.LoadFromTableName Application.ActiveWorkbook, strName
+        End If
+        Set ResolveStyleConfigDf = df
+        Exit Function
+    End If
+
+    If Not IsObject(Source) Then
+        Err.Raise 5, "cTableStyler.ApplyStyleFromTable", "StyleTableOrDf must be a Table Name string, cDataFrame, ListObject, or Range."
+    End If
+    If Source Is Nothing Then
+        Err.Raise 91, "cTableStyler.ApplyStyleFromTable", "StyleTableOrDf cannot be Nothing."
+    End If
+
+    If TypeOf Source Is cDataFrame Then
+        Set ResolveStyleConfigDf = Source
+        Exit Function
+    End If
+
+    On Error Resume Next
+    Dim loTest As Object
+    Set loTest = Source.ListColumns
+    On Error GoTo 0
+    If Not loTest Is Nothing Then
+        df.LoadFromListObject Source
+    Else
+        df.LoadFromRange Source, True
+    End If
+    Set ResolveStyleConfigDf = df
+End Function
+
+Private Function FindStyleColName(ByVal Df As cDataFrame, ByVal Candidates As Variant) As String
+    Dim names() As String
+    names = Df.ColumnNames()
+    Dim i As Long, j As Long
+    For j = LBound(Candidates) To UBound(Candidates)
+        For i = LBound(names) To UBound(names)
+            If StrComp(Trim$(names(i)), CStr(Candidates(j)), vbTextCompare) = 0 Then
+                FindStyleColName = names(i)
+                Exit Function
+            End If
+        Next i
+    Next j
+End Function
+
+Private Function ParseStyleColor(ByVal ColorVal As Variant, ByVal DefaultColor As Long) As Long
+    If IsEmpty(ColorVal) Or IsNull(ColorVal) Then
+        ParseStyleColor = DefaultColor
+        Exit Function
+    End If
+    Dim s As String
+    s = Trim$(CStr(ColorVal))
+    If Len(s) = 0 Then
+        ParseStyleColor = DefaultColor
+        Exit Function
+    End If
+    If Left$(s, 1) = "#" Then s = Mid$(s, 2)
+    If Len(s) = 6 And Not IsNumeric(s) Then
+        On Error Resume Next
+        Dim rHex As Long, gHex As Long, bHex As Long
+        rHex = CLng("&H" & Left$(s, 2))
+        gHex = CLng("&H" & Mid$(s, 3, 2))
+        bHex = CLng("&H" & Right$(s, 2))
+        If Err.Number = 0 Then
+            ParseStyleColor = RGB(rHex, gHex, bHex)
+            On Error GoTo 0
+            Exit Function
+        End If
+        On Error GoTo 0
+    End If
+    If IsNumeric(s) Then
+        ParseStyleColor = CLng(s)
+    Else
+        ParseStyleColor = DefaultColor
+    End If
+End Function
+
+Private Function ParseAlignCode(ByVal AlignVal As String) As Long
+    Select Case UCase$(Trim$(AlignVal))
+        Case "LEFT", "L": ParseAlignCode = -4131
+        Case "CENTER", "CENTRE", "C", "MID": ParseAlignCode = -4108
+        Case "RIGHT", "R": ParseAlignCode = -4152
+        Case Else
+            If IsNumeric(AlignVal) Then ParseAlignCode = CLng(AlignVal) Else ParseAlignCode = -4131
+    End Select
+End Function
+
+Private Function ParseStyleBool(ByVal Val As Variant, Optional ByVal DefaultVal As Boolean = True) As Boolean
+    If IsEmpty(Val) Or IsNull(Val) Then
+        ParseStyleBool = DefaultVal
+        Exit Function
+    End If
+    If VarType(Val) = vbBoolean Then
+        ParseStyleBool = CBool(Val)
+        Exit Function
+    End If
+    Dim s As String
+    s = UCase$(Trim$(CStr(Val)))
+    If Len(s) = 0 Then
+        ParseStyleBool = DefaultVal
+    ElseIf s = "TRUE" Or s = "YES" Or s = "Y" Or s = "1" Or s = "ON" Then
+        ParseStyleBool = True
+    ElseIf s = "FALSE" Or s = "NO" Or s = "N" Or s = "0" Or s = "OFF" Then
+        ParseStyleBool = False
+    Else
+        ParseStyleBool = DefaultVal
+    End If
+End Function
 
 Private Function PureDataRowCount() As Long
     If mTotalRowHighlighted And mRowCount > 0 Then

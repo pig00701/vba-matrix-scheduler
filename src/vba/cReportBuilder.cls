@@ -1249,6 +1249,159 @@ Public Function BuildMultiSheetReport(ByVal TargetWorkbook As Object, _
     Set BuildMultiSheetReport = createdSheets
 End Function
 
+' Applies report-level settings from a key-value Config Table (ListObject, Range, or cDataFrame).
+' Recognized keys (case-insensitive): Theme, FontName, ShowGridlines/Gridlines,
+' PageOrientation/Orientation (Portrait/Landscape or 1/2), FreezeRows, AutoFit.
+Public Function ApplyConfigFromTable(ByVal ConfigTableOrDf As Variant, _
+                                     Optional ByVal KeyColumn As Variant = 1, _
+                                     Optional ByVal ValueColumn As Variant = 2) As cReportBuilder
+    CheckAttached "ApplyConfigFromTable"
+
+    Dim cfgDf As cDataFrame
+    Set cfgDf = ResolveReportConfigDf(ConfigTableOrDf)
+    If cfgDf.RowCount = 0 Or cfgDf.ColumnCount < 2 Then
+        Set ApplyConfigFromTable = Me
+        Exit Function
+    End If
+
+    Dim cfg As Object
+    Set cfg = cfgDf.ToConfigDict(KeyColumn, ValueColumn)
+
+    Dim themeVal As String
+    themeVal = Trim$(CStr(cfg("Theme")))
+    If Len(themeVal) > 0 And Not mLastTableStyler Is Nothing Then
+        mLastTableStyler.ApplyTheme themeVal
+    End If
+
+    Dim fontVal As String
+    fontVal = Trim$(CStr(cfg("FontName")))
+    If Len(fontVal) > 0 And Not mLastTableStyler Is Nothing Then
+        mLastTableStyler.SetFont fontVal
+    End If
+
+    Dim gridKey As String
+    If cfg.Exists("ShowGridlines") Then
+        gridKey = "ShowGridlines"
+    ElseIf cfg.Exists("Gridlines") Then
+        gridKey = "Gridlines"
+    End If
+    If Len(gridKey) > 0 Then
+        Dim showGrid As Boolean
+        Dim gs As String
+        gs = UCase$(Trim$(CStr(cfg(gridKey))))
+        showGrid = Not (gs = "FALSE" Or gs = "NO" Or gs = "0" Or gs = "OFF")
+        If Not mLastTableStyler Is Nothing Then
+            mLastTableStyler.SetGridlines showGrid
+        Else
+            On Error Resume Next
+            mWorksheet.Application.ActiveWindow.DisplayGridlines = showGrid
+            On Error GoTo 0
+        End If
+    End If
+
+    Dim orientKey As String
+    If cfg.Exists("PageOrientation") Then
+        orientKey = "PageOrientation"
+    ElseIf cfg.Exists("Orientation") Then
+        orientKey = "Orientation"
+    End If
+    If Len(orientKey) > 0 Then
+        Dim orientStr As String
+        orientStr = UCase$(Trim$(CStr(cfg(orientKey))))
+        If orientStr = "PORTRAIT" Or orientStr = "1" Then
+            Me.ConfigurePageSetup 1
+        ElseIf orientStr = "LANDSCAPE" Or orientStr = "2" Then
+            Me.ConfigurePageSetup 2
+        End If
+    End If
+
+    If cfg.Exists("FreezeRows") And Not mLastTableStyler Is Nothing Then
+        If IsNumeric(cfg("FreezeRows")) Then
+            mLastTableStyler.FreezePanes CLng(cfg("FreezeRows"))
+        End If
+    End If
+
+    If cfg.Exists("AutoFit") Then
+        Dim afStr As String
+        afStr = UCase$(Trim$(CStr(cfg("AutoFit"))))
+        If afStr = "TRUE" Or afStr = "YES" Or afStr = "1" Then
+            Me.AutoFitAll
+        End If
+    End If
+
+    If cfg.Exists("Zoom") Then
+        If IsNumeric(cfg("Zoom")) Then
+            On Error Resume Next
+            mWorksheet.Application.ActiveWindow.Zoom = CLng(cfg("Zoom"))
+            On Error GoTo 0
+        End If
+    End If
+
+    If cfg.Exists("TabColor") Then
+        Dim tabClr As Long
+        tabClr = cfgDf.GetConfigColor("TabColor", -1&)
+        If tabClr >= 0 Then
+            On Error Resume Next
+            mWorksheet.Tab.Color = tabClr
+            On Error GoTo 0
+        End If
+    End If
+
+    If cfg.Exists("ProtectSheet") Then
+        Dim protBool As Boolean
+        protBool = cfgDf.GetConfigBool("ProtectSheet", False)
+        If protBool Then
+            Dim pwd As String
+            pwd = cfgDf.GetConfigString("SheetPassword", "")
+            On Error Resume Next
+            If Len(pwd) > 0 Then mWorksheet.Protect pwd Else mWorksheet.Protect
+            On Error GoTo 0
+        End If
+    End If
+
+    Set ApplyConfigFromTable = Me
+End Function
+
+Private Function ResolveReportConfigDf(ByVal Source As Variant) As cDataFrame
+    Dim df As New cDataFrame
+
+    If VarType(Source) = vbString Then
+        Dim strName As String
+        strName = Trim$(CStr(Source))
+        If Len(strName) = 0 Then
+            Err.Raise 5, SRC & ".ApplyConfigFromTable", "TableName string cannot be blank."
+        End If
+        If Not mWorksheet Is Nothing Then
+            df.LoadFromTableName mWorksheet, strName
+        Else
+            df.LoadFromTableName Application.ActiveWorkbook, strName
+        End If
+        Set ResolveReportConfigDf = df
+        Exit Function
+    End If
+
+    If Not IsObject(Source) Then
+        Err.Raise 5, SRC & ".ApplyConfigFromTable", "ConfigTableOrDf must be a Table Name string, cDataFrame, ListObject, or Range."
+    End If
+    If Source Is Nothing Then
+        Err.Raise 91, SRC & ".ApplyConfigFromTable", "ConfigTableOrDf cannot be Nothing."
+    End If
+    If TypeOf Source Is cDataFrame Then
+        Set ResolveReportConfigDf = Source
+        Exit Function
+    End If
+    On Error Resume Next
+    Dim loTest As Object
+    Set loTest = Source.ListColumns
+    On Error GoTo 0
+    If Not loTest Is Nothing Then
+        df.LoadFromListObject Source
+    Else
+        df.LoadFromRange Source, True
+    End If
+    Set ResolveReportConfigDf = df
+End Function
+
 ' ------------------------------------------------------------------------------
 ' Properties
 ' ------------------------------------------------------------------------------

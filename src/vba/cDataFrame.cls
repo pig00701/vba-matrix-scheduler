@@ -4754,3 +4754,192 @@ Public Function BuildCalendarMatrix(ByVal DateColumn As Variant, _
     Set BuildCalendarMatrix = resultDf
 End Function
 
+' Finds an Excel Table (ListObject) by name on a Worksheet or across a Workbook and loads it.
+Public Function LoadFromTableName(ByVal SheetOrWorkbook As Object, _
+                                  ByVal TableName As String) As cDataFrame
+    If SheetOrWorkbook Is Nothing Then
+        Err.Raise 91, "cDataFrame.LoadFromTableName", "SheetOrWorkbook cannot be Nothing."
+    End If
+
+    Dim cleanName As String
+    cleanName = Trim$(TableName)
+    If Len(cleanName) = 0 Then
+        Err.Raise 5, "cDataFrame.LoadFromTableName", "TableName cannot be blank."
+    End If
+
+    Dim foundLo As Object
+    Set foundLo = Nothing
+
+    On Error Resume Next
+    Set foundLo = SheetOrWorkbook.ListObjects(cleanName)
+    If foundLo Is Nothing Then
+        Err.Clear
+        Dim ws As Object
+        Dim sheetsColl As Object
+        Set sheetsColl = SheetOrWorkbook.Worksheets
+        If Err.Number = 0 And Not sheetsColl Is Nothing Then
+            For Each ws In sheetsColl
+                Set foundLo = ws.ListObjects(cleanName)
+                If Not foundLo Is Nothing Then Exit For
+                Err.Clear
+            Next ws
+        End If
+    End If
+    On Error GoTo 0
+
+    If foundLo Is Nothing Then
+        Err.Raise 5, "cDataFrame.LoadFromTableName", "Excel Table '" & cleanName & "' was not found."
+    End If
+
+    Set LoadFromTableName = Me.LoadFromListObject(foundLo)
+End Function
+
+' Converts a key-value DataFrame (e.g. tbConfig) into a case-insensitive Scripting.Dictionary.
+Public Function ToConfigDict(Optional ByVal KeyColumn As Variant = 1, _
+                             Optional ByVal ValueColumn As Variant = 2) As Object
+    Dim dict As Object
+    Set dict = CreateObject("Scripting.Dictionary")
+    dict.CompareMode = 1 ' TextCompare
+
+    If mRowCount = 0 Or Me.ColumnCount = 0 Then
+        Set ToConfigDict = dict
+        Exit Function
+    End If
+
+    Dim keyCol As cColumn, valCol As cColumn
+    Set keyCol = Me.Column(KeyColumn)
+    Set valCol = Me.Column(ValueColumn)
+
+    Dim r As Long, kStr As String
+    For r = 1 To mRowCount
+        kStr = Trim$(CStr(keyCol.Item(r)))
+        If Len(kStr) > 0 Then
+            dict.Item(kStr) = valCol.Item(r)
+        End If
+    Next r
+
+    Set ToConfigDict = dict
+End Function
+
+' Looks up a single configuration value by key (case-insensitive), returning DefaultValue if missing/empty.
+Public Function GetConfigValue(ByVal ConfigKey As String, _
+                               Optional ByVal DefaultValue As Variant = Empty, _
+                               Optional ByVal KeyColumn As Variant = 1, _
+                               Optional ByVal ValueColumn As Variant = 2) As Variant
+    Dim cleanKey As String
+    cleanKey = Trim$(ConfigKey)
+    If Len(cleanKey) = 0 Or mRowCount = 0 Or Me.ColumnCount = 0 Then
+        GetConfigValue = DefaultValue
+        Exit Function
+    End If
+
+    Dim keyCol As cColumn, valCol As cColumn
+    Set keyCol = Me.Column(KeyColumn)
+    Set valCol = Me.Column(ValueColumn)
+
+    Dim r As Long, rowKey As String
+    For r = 1 To mRowCount
+        rowKey = Trim$(CStr(keyCol.Item(r)))
+        If StrComp(rowKey, cleanKey, vbTextCompare) = 0 Then
+            Dim v As Variant
+            v = valCol.Item(r)
+            If IsEmpty(v) Or IsNull(v) Or Len(Trim$(CStr(v))) = 0 Then
+                GetConfigValue = DefaultValue
+            Else
+                GetConfigValue = v
+            End If
+            Exit Function
+        End If
+    Next r
+
+    GetConfigValue = DefaultValue
+End Function
+
+' Typed configuration lookup helpers
+Public Function GetConfigString(ByVal ConfigKey As String, _
+                                Optional ByVal DefaultValue As String = "", _
+                                Optional ByVal KeyColumn As Variant = 1, _
+                                Optional ByVal ValueColumn As Variant = 2) As String
+    Dim v As Variant
+    v = GetConfigValue(ConfigKey, DefaultValue, KeyColumn, ValueColumn)
+    If IsEmpty(v) Or IsNull(v) Then GetConfigString = DefaultValue Else GetConfigString = CStr(v)
+End Function
+
+Public Function GetConfigLong(ByVal ConfigKey As String, _
+                              Optional ByVal DefaultValue As Long = 0&, _
+                              Optional ByVal KeyColumn As Variant = 1, _
+                              Optional ByVal ValueColumn As Variant = 2) As Long
+    Dim v As Variant
+    v = GetConfigValue(ConfigKey, DefaultValue, KeyColumn, ValueColumn)
+    If IsNumeric(v) Then GetConfigLong = CLng(v) Else GetConfigLong = DefaultValue
+End Function
+
+Public Function GetConfigDouble(ByVal ConfigKey As String, _
+                                Optional ByVal DefaultValue As Double = 0#, _
+                                Optional ByVal KeyColumn As Variant = 1, _
+                                Optional ByVal ValueColumn As Variant = 2) As Double
+    Dim v As Variant
+    v = GetConfigValue(ConfigKey, DefaultValue, KeyColumn, ValueColumn)
+    If IsNumeric(v) Then GetConfigDouble = CDbl(v) Else GetConfigDouble = DefaultValue
+End Function
+
+Public Function GetConfigBool(ByVal ConfigKey As String, _
+                              Optional ByVal DefaultValue As Boolean = False, _
+                              Optional ByVal KeyColumn As Variant = 1, _
+                              Optional ByVal ValueColumn As Variant = 2) As Boolean
+    Dim v As Variant
+    v = GetConfigValue(ConfigKey, DefaultValue, KeyColumn, ValueColumn)
+    If IsEmpty(v) Or IsNull(v) Then
+        GetConfigBool = DefaultValue
+    ElseIf VarType(v) = vbBoolean Then
+        GetConfigBool = CBool(v)
+    Else
+        Dim s As String
+        s = UCase$(Trim$(CStr(v)))
+        If s = "TRUE" Or s = "YES" Or s = "1" Or s = "Y" Or s = "ON" Then
+            GetConfigBool = True
+        ElseIf s = "FALSE" Or s = "NO" Or s = "0" Or s = "N" Or s = "OFF" Then
+            GetConfigBool = False
+        Else
+            GetConfigBool = DefaultValue
+        End If
+    End If
+End Function
+
+Public Function GetConfigColor(ByVal ConfigKey As String, _
+                               Optional ByVal DefaultColor As Long = -1&, _
+                               Optional ByVal KeyColumn As Variant = 1, _
+                               Optional ByVal ValueColumn As Variant = 2) As Long
+    Dim v As Variant
+    v = GetConfigValue(ConfigKey, DefaultColor, KeyColumn, ValueColumn)
+    If IsEmpty(v) Or IsNull(v) Then
+        GetConfigColor = DefaultColor
+        Exit Function
+    End If
+    Dim s As String
+    s = Trim$(CStr(v))
+    If Len(s) = 0 Then
+        GetConfigColor = DefaultColor
+        Exit Function
+    End If
+    If Left$(s, 1) = "#" Then s = Mid$(s, 2)
+    If Len(s) = 6 And Not IsNumeric(s) Then
+        On Error Resume Next
+        Dim rHex As Long, gHex As Long, bHex As Long
+        rHex = CLng("&H" & Left$(s, 2))
+        gHex = CLng("&H" & Mid$(s, 3, 2))
+        bHex = CLng("&H" & Right$(s, 2))
+        If Err.Number = 0 Then
+            GetConfigColor = RGB(rHex, gHex, bHex)
+            On Error GoTo 0
+            Exit Function
+        End If
+        On Error GoTo 0
+    End If
+    If IsNumeric(s) Then
+        GetConfigColor = CLng(s)
+    Else
+        GetConfigColor = DefaultColor
+    End If
+End Function
+

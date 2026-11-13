@@ -448,3 +448,192 @@ Public Function GetInvalidRows(ByVal SourceDf As cDataFrame) As cDataFrame
 
     Set GetInvalidRows = dirtyDf
 End Function
+
+' Loads validation rules from an Excel Table (ListObject), Range, or cDataFrame.
+' Supported columns (case-insensitive): ColumnName/Column, ExpectedType/Type,
+' AllowNull/Required, IsUnique/Unique, MinVal/Min, MaxVal/Max, AllowedValues, LikePattern/Pattern, Enabled.
+Public Function AddRulesFromTable(ByVal RuleTableOrDf As Variant) As cDataValidator
+    Dim ruleDf As cDataFrame
+    Set ruleDf = ResolveRuleDf(RuleTableOrDf)
+    If ruleDf.RowCount = 0 Then
+        Set AddRulesFromTable = Me
+        Exit Function
+    End If
+
+    Dim colNameCol As String, typeCol As String, allowNullCol As String, reqCol As String
+    Dim uniqCol As String, minCol As String, maxCol As String
+    Dim allowedCol As String, patternCol As String, enabledCol As String
+
+    colNameCol = FindRuleColName(ruleDf, Array("ColumnName", "Column", "Field"))
+    If Len(colNameCol) = 0 Then
+        Err.Raise 5, "cDataValidator.AddRulesFromTable", "Rule table requires a 'ColumnName' (or 'Column') column."
+    End If
+
+    typeCol = FindRuleColName(ruleDf, Array("ExpectedType", "Type", "DataType"))
+    allowNullCol = FindRuleColName(ruleDf, Array("AllowNull", "Nullable"))
+    reqCol = FindRuleColName(ruleDf, Array("Required", "IsRequired"))
+    uniqCol = FindRuleColName(ruleDf, Array("IsUnique", "Unique"))
+    minCol = FindRuleColName(ruleDf, Array("MinVal", "Min", "MinValue"))
+    maxCol = FindRuleColName(ruleDf, Array("MaxVal", "Max", "MaxValue"))
+    allowedCol = FindRuleColName(ruleDf, Array("AllowedValues", "Allowed", "Whitelist"))
+    patternCol = FindRuleColName(ruleDf, Array("LikePattern", "Pattern"))
+    enabledCol = FindRuleColName(ruleDf, Array("Enabled", "Active", "IsEnabled"))
+
+    Dim r As Long
+    For r = 1 To ruleDf.RowCount
+        If Len(enabledCol) > 0 Then
+            If Not ParseRuleBool(ruleDf.Item(r, enabledCol), True) Then GoTo NextRuleRow
+        End If
+
+        Dim targetCol As String
+        targetCol = Trim$(CStr(ruleDf.Item(r, colNameCol)))
+        If Len(targetCol) = 0 Then GoTo NextRuleRow
+
+        Dim expType As VbVarType
+        expType = vbEmpty
+        If Len(typeCol) > 0 Then expType = ParseExpectedVarType(CStr(ruleDf.Item(r, typeCol)))
+
+        Dim allowNull As Boolean
+        allowNull = True
+        If Len(allowNullCol) > 0 Then
+            allowNull = ParseRuleBool(ruleDf.Item(r, allowNullCol), True)
+        ElseIf Len(reqCol) > 0 Then
+            allowNull = Not ParseRuleBool(ruleDf.Item(r, reqCol), False)
+        End If
+
+        Dim isUniq As Boolean
+        isUniq = False
+        If Len(uniqCol) > 0 Then isUniq = ParseRuleBool(ruleDf.Item(r, uniqCol), False)
+
+        Dim minV As Variant, maxV As Variant
+        minV = Empty
+        maxV = Empty
+        If Len(minCol) > 0 Then
+            Dim rawMin As Variant
+            rawMin = ruleDf.Item(r, minCol)
+            If Not IsEmpty(rawMin) And Not IsNull(rawMin) Then
+                If Len(Trim$(CStr(rawMin))) > 0 Then minV = CDbl(rawMin)
+            End If
+        End If
+        If Len(maxCol) > 0 Then
+            Dim rawMax As Variant
+            rawMax = ruleDf.Item(r, maxCol)
+            If Not IsEmpty(rawMax) And Not IsNull(rawMax) Then
+                If Len(Trim$(CStr(rawMax))) > 0 Then maxV = CDbl(rawMax)
+            End If
+        End If
+
+        Dim allowedV As Variant
+        allowedV = Empty
+        If Len(allowedCol) > 0 Then
+            Dim rawAllowed As String
+            rawAllowed = Trim$(CStr(ruleDf.Item(r, allowedCol)))
+            If Len(rawAllowed) > 0 Then
+                Dim parts() As String, idx As Long
+                If InStr(rawAllowed, "|") > 0 Then
+                    parts = Split(rawAllowed, "|")
+                Else
+                    parts = Split(rawAllowed, ",")
+                End If
+                For idx = LBound(parts) To UBound(parts)
+                    parts(idx) = Trim$(parts(idx))
+                Next idx
+                allowedV = parts
+            End If
+        End If
+
+        Dim patStr As String
+        patStr = ""
+        If Len(patternCol) > 0 Then patStr = Trim$(CStr(ruleDf.Item(r, patternCol)))
+
+        Me.AddRule targetCol, ExpectedType:=expType, AllowNull:=allowNull, _
+                   IsUnique:=isUniq, MinVal:=minV, MaxVal:=maxV, _
+                   AllowedValues:=allowedV, LikePattern:=patStr
+NextRuleRow:
+    Next r
+
+    Set AddRulesFromTable = Me
+End Function
+
+Private Function ResolveRuleDf(ByVal Source As Variant) As cDataFrame
+    Dim df As New cDataFrame
+
+    If VarType(Source) = vbString Then
+        Dim strName As String
+        strName = Trim$(CStr(Source))
+        If Len(strName) = 0 Then
+            Err.Raise 5, "cDataValidator.AddRulesFromTable", "TableName string cannot be blank."
+        End If
+        df.LoadFromTableName Application.ActiveWorkbook, strName
+        Set ResolveRuleDf = df
+        Exit Function
+    End If
+
+    If Not IsObject(Source) Then
+        Err.Raise 5, "cDataValidator.AddRulesFromTable", "RuleTableOrDf must be a Table Name string, cDataFrame, ListObject, or Range."
+    End If
+    If Source Is Nothing Then
+        Err.Raise 91, "cDataValidator.AddRulesFromTable", "RuleTableOrDf cannot be Nothing."
+    End If
+    If TypeOf Source Is cDataFrame Then
+        Set ResolveRuleDf = Source
+        Exit Function
+    End If
+    On Error Resume Next
+    Dim loTest As Object
+    Set loTest = Source.ListColumns
+    On Error GoTo 0
+    If Not loTest Is Nothing Then
+        df.LoadFromListObject Source
+    Else
+        df.LoadFromRange Source, True
+    End If
+    Set ResolveRuleDf = df
+End Function
+
+Private Function FindRuleColName(ByVal Df As cDataFrame, ByVal Candidates As Variant) As String
+    Dim names() As String
+    names = Df.ColumnNames()
+    Dim i As Long, j As Long
+    For j = LBound(Candidates) To UBound(Candidates)
+        For i = LBound(names) To UBound(names)
+            If StrComp(Trim$(names(i)), CStr(Candidates(j)), vbTextCompare) = 0 Then
+                FindRuleColName = names(i)
+                Exit Function
+            End If
+        Next i
+    Next j
+End Function
+
+Private Function ParseExpectedVarType(ByVal TypeStr As String) As VbVarType
+    Select Case UCase$(Trim$(TypeStr))
+        Case "STRING", "TEXT", "STR": ParseExpectedVarType = vbString
+        Case "LONG", "INT", "INTEGER": ParseExpectedVarType = vbLong
+        Case "DOUBLE", "NUMBER", "NUM", "FLOAT", "DECIMAL": ParseExpectedVarType = vbDouble
+        Case "DATE", "DATETIME": ParseExpectedVarType = vbDate
+        Case "BOOL", "BOOLEAN": ParseExpectedVarType = vbBoolean
+        Case Else: ParseExpectedVarType = vbEmpty
+    End Select
+End Function
+
+Private Function ParseRuleBool(ByVal Val As Variant, Optional ByVal DefaultVal As Boolean = False) As Boolean
+    If IsEmpty(Val) Or IsNull(Val) Then
+        ParseRuleBool = DefaultVal
+        Exit Function
+    End If
+    If VarType(Val) = vbBoolean Then
+        ParseRuleBool = CBool(Val)
+        Exit Function
+    End If
+    Dim s As String
+    s = UCase$(Trim$(CStr(Val)))
+    If Len(s) = 0 Then
+        ParseRuleBool = DefaultVal
+    ElseIf s = "TRUE" Or s = "YES" Or s = "Y" Or s = "1" Then
+        ParseRuleBool = True
+    ElseIf s = "FALSE" Or s = "NO" Or s = "N" Or s = "0" Then
+        ParseRuleBool = False
+    Else
+        ParseRuleBool = DefaultVal
+    End If
+End Function
