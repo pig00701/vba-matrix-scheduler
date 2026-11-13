@@ -32,15 +32,19 @@ Private mTableRange As Object
 Private mHeaderRange As Object
 Private mDataBodyRange As Object
 Private mTopLeftCell As Object
+Private mListObject As Object
 Private mRowCount As Long
 Private mColumnCount As Long
 Private mHasHeaders As Boolean
+Private mUseStructuredReferences As Boolean
 Private mColIndexMap As Object ' Scripting.Dictionary: Name/Key -> 1-based column index
 
 Private Sub Class_Initialize()
     mRowCount = 0
     mColumnCount = 0
     mHasHeaders = True
+    mUseStructuredReferences = False
+    Set mListObject = Nothing
     Set mColIndexMap = CreateObject("Scripting.Dictionary")
     mColIndexMap.CompareMode = 1 ' TextCompare (case-insensitive)
 End Sub
@@ -51,6 +55,7 @@ Private Sub Class_Terminate()
     Set mHeaderRange = Nothing
     Set mDataBodyRange = Nothing
     Set mTopLeftCell = Nothing
+    Set mListObject = Nothing
     Set mColIndexMap = Nothing
 End Sub
 
@@ -81,6 +86,7 @@ Public Function Attach(ByVal TargetRangeOrSheet As Object, _
     Dim rng As Object
     Set rng = TargetRangeOrSheet
 
+    Set mListObject = Nothing
     Set mTableRange = rng
     Set mWorksheet = rng.Worksheet
     Set mTopLeftCell = rng.Cells(1, 1)
@@ -134,6 +140,7 @@ Public Function AttachListObject(ByVal TableObj As Object) As cFormulaEngine
     mColIndexMap.RemoveAll
     mHasHeaders = True
 
+    Set mListObject = TableObj
     Set mTableRange = TableObj.Range
     Set mWorksheet = TableObj.Range.Worksheet
     Set mTopLeftCell = TableObj.Range.Cells(1, 1)
@@ -461,6 +468,283 @@ Public Function SetRunningTotalFormula(ByVal TargetColKey As Variant, _
     Set SetRunningTotalFormula = SetColumnFormula(TargetColKey, tmpl, UseAutoFill:=True)
 End Function
 
+' Freezes formulas into static values across the entire table or a specific column.
+' Replaces Range.Formula with Range.Value to prevent re-calculation.
+Public Function FreezeToValues(Optional ByVal ColumnKey As Variant = Empty) As cFormulaEngine
+    CheckAttached "FreezeToValues"
+    If mRowCount = 0 Then
+        Set FreezeToValues = Me
+        Exit Function
+    End If
+
+    If IsEmpty(ColumnKey) Then
+        mDataBodyRange.Value = mDataBodyRange.Value
+    Else
+        Dim cIdx As Long
+        cIdx = ResolveColIndex(ColumnKey)
+        Dim targetColRng As Object
+        Set targetColRng = mDataBodyRange.Columns(cIdx)
+        targetColRng.Value = targetColRng.Value
+    End If
+
+    Set FreezeToValues = Me
+End Function
+
+' Wraps existing formula in ColumnKey with =IFERROR(..., FallbackValue).
+Public Function SetIfErrorWrapper(ByVal ColumnKey As Variant, _
+                                  Optional ByVal FallbackValue As Variant = 0) As cFormulaEngine
+    CheckAttached "SetIfErrorWrapper"
+    If mRowCount = 0 Then
+        Set SetIfErrorWrapper = Me
+        Exit Function
+    End If
+
+    Dim cIdx As Long
+    cIdx = ResolveColIndex(ColumnKey)
+    Dim colDataRng As Object
+    Set colDataRng = mDataBodyRange.Columns(cIdx)
+
+    Dim topCell As Object
+    Set topCell = colDataRng.Cells(1, 1)
+
+    Dim curFmla As String
+    curFmla = Trim$(CStr(topCell.Formula))
+    If Len(curFmla) = 0 Then
+        Err.Raise 5, "cFormulaEngine.SetIfErrorWrapper", "Column '" & CStr(ColumnKey) & "' has no formula to wrap."
+    End If
+
+    If Left$(curFmla, 1) = "=" Then curFmla = Mid$(curFmla, 2)
+    If Left$(UCase$(curFmla), 8) = "IFERROR(" Then
+        ' Already wrapped
+        Set SetIfErrorWrapper = Me
+        Exit Function
+    End If
+
+    Dim strFallback As String
+    If VarType(FallbackValue) = vbString Then
+        strFallback = """" & Replace(CStr(FallbackValue), """", """""") & """"
+    ElseIf IsEmpty(FallbackValue) Then
+        strFallback = """"""
+    Else
+        strFallback = CStr(FallbackValue)
+    End If
+
+    Dim wrappedFmla As String
+    wrappedFmla = "=IFERROR(" & curFmla & ", " & strFallback & ")"
+    topCell.Formula = wrappedFmla
+
+    If mRowCount > 1 Then
+        topCell.AutoFill Destination:=colDataRng, Type:=XL_FILL_DEFAULT
+    End If
+
+    Set SetIfErrorWrapper = Me
+End Function
+
+' Injects an INDEX-MATCH lookup formula across an entire column.
+Public Function SetIndexMatchLookup(ByVal TargetColKey As Variant, _
+                                    ByVal MatchValColKey As Variant, _
+                                    ByVal LookupSheetName As String, _
+                                    ByVal LookupRangeAddress As String, _
+                                    ByVal ReturnRangeAddress As String, _
+                                    Optional ByVal MatchType As Long = 0) As cFormulaEngine
+    CheckAttached "SetIndexMatchLookup"
+
+    Dim kColIdx As Long
+    kColIdx = ResolveColIndex(MatchValColKey)
+    Dim kColLetter As String
+    kColLetter = ColIndexToLetter(mDataBodyRange.Column + kColIdx - 1)
+
+    Dim sheetRef As String
+    If Len(LookupSheetName) > 0 Then
+        If InStr(LookupSheetName, " ") > 0 Or InStr(LookupSheetName, "-") > 0 Then
+            sheetRef = "'" & Replace(LookupSheetName, "'", "''") & "'!"
+        Else
+            sheetRef = LookupSheetName & "!"
+        End If
+    Else
+        sheetRef = ""
+    End If
+
+    Dim tmpl As String
+    tmpl = "=INDEX(" & sheetRef & ReturnRangeAddress & ", MATCH(" & kColLetter & "{row}, " & _
+           sheetRef & LookupRangeAddress & ", " & CStr(MatchType) & "))"
+
+    Set SetIndexMatchLookup = SetColumnFormula(TargetColKey, tmpl, UseAutoFill:=True)
+End Function
+
+' Injects an XLOOKUP formula across an entire column.
+Public Function SetXLookup(ByVal TargetColKey As Variant, _
+                           ByVal LookupValColKey As Variant, _
+                           ByVal LookupSheetName As String, _
+                           ByVal LookupRangeAddress As String, _
+                           ByVal ReturnRangeAddress As String, _
+                           Optional ByVal IfNotFound As String = "", _
+                           Optional ByVal MatchMode As Long = 0) As cFormulaEngine
+    CheckAttached "SetXLookup"
+
+    Dim kColIdx As Long
+    kColIdx = ResolveColIndex(LookupValColKey)
+    Dim kColLetter As String
+    kColLetter = ColIndexToLetter(mDataBodyRange.Column + kColIdx - 1)
+
+    Dim sheetRef As String
+    If Len(LookupSheetName) > 0 Then
+        If InStr(LookupSheetName, " ") > 0 Or InStr(LookupSheetName, "-") > 0 Then
+            sheetRef = "'" & Replace(LookupSheetName, "'", "''") & "'!"
+        Else
+            sheetRef = LookupSheetName & "!"
+        End If
+    Else
+        sheetRef = ""
+    End If
+
+    Dim tmpl As String
+    tmpl = "=XLOOKUP(" & kColLetter & "{row}, " & sheetRef & LookupRangeAddress & ", " & _
+           sheetRef & ReturnRangeAddress
+
+    If Len(IfNotFound) > 0 Or MatchMode <> 0 Then
+        tmpl = tmpl & ", """ & Replace(IfNotFound, """", """""") & """"
+    End If
+    If MatchMode <> 0 Then
+        tmpl = tmpl & ", " & CStr(MatchMode)
+    End If
+    tmpl = tmpl & ")"
+
+    Set SetXLookup = SetColumnFormula(TargetColKey, tmpl, UseAutoFill:=True)
+End Function
+
+' Injects a Percentage of Total formula (=SourceCell / SUM(SourceCol$first:SourceCol$last))
+Public Function SetPercentageOfTotal(ByVal TargetColKey As Variant, _
+                                     ByVal SourceColKey As Variant, _
+                                     Optional ByVal NumberFormatStr As String = "0.0%") As cFormulaEngine
+    CheckAttached "SetPercentageOfTotal"
+
+    Dim sColIdx As Long
+    sColIdx = ResolveColIndex(SourceColKey)
+    Dim sColLetter As String
+    sColLetter = ColIndexToLetter(mDataBodyRange.Column + sColIdx - 1)
+
+    Dim rFirst As Long, rLast As Long
+    rFirst = mDataBodyRange.Row
+    rLast = mDataBodyRange.Row + mRowCount - 1
+
+    Dim tmpl As String
+    tmpl = "=IFERROR(" & sColLetter & "{row} / SUM(" & sColLetter & "$" & CStr(rFirst) & ":" & sColLetter & "$" & CStr(rLast) & "), 0)"
+
+    Set SetPercentageOfTotal = SetColumnFormula(TargetColKey, tmpl, UseAutoFill:=True)
+
+    If Len(NumberFormatStr) > 0 Then
+        Dim tColIdx As Long
+        tColIdx = ResolveColIndex(TargetColKey)
+        mDataBodyRange.Columns(tColIdx).NumberFormat = NumberFormatStr
+    End If
+End Function
+
+' Injects an Actual vs Budget Variance formula across a column.
+Public Function SetVarianceFormula(ByVal TargetColKey As Variant, _
+                                   ByVal ActualColKey As Variant, _
+                                   ByVal BudgetColKey As Variant, _
+                                   Optional ByVal AsPercentage As Boolean = False, _
+                                   Optional ByVal NumberFormatStr As String = "") As cFormulaEngine
+    CheckAttached "SetVarianceFormula"
+
+    Dim aColIdx As Long, bColIdx As Long
+    aColIdx = ResolveColIndex(ActualColKey)
+    bColIdx = ResolveColIndex(BudgetColKey)
+
+    Dim aColLetter As String, bColLetter As String
+    aColLetter = ColIndexToLetter(mDataBodyRange.Column + aColIdx - 1)
+    bColLetter = ColIndexToLetter(mDataBodyRange.Column + bColIdx - 1)
+
+    Dim tmpl As String
+    If AsPercentage Then
+        tmpl = "=IFERROR((" & aColLetter & "{row} - " & bColLetter & "{row}) / " & bColLetter & "{row}, 0)"
+    Else
+        tmpl = "=" & aColLetter & "{row} - " & bColLetter & "{row}"
+    End If
+
+    Set SetVarianceFormula = SetColumnFormula(TargetColKey, tmpl, UseAutoFill:=True)
+
+    Dim fmt As String
+    fmt = NumberFormatStr
+    If Len(fmt) = 0 And AsPercentage Then fmt = "0.0%"
+
+    If Len(fmt) > 0 Then
+        Dim tColIdx As Long
+        tColIdx = ResolveColIndex(TargetColKey)
+        mDataBodyRange.Columns(tColIdx).NumberFormat = fmt
+    End If
+End Function
+
+' Scans the data range for cells containing Excel formula errors (#DIV/0!, #REF!, #N/A, #VALUE!, etc.)
+' Returns a cDataFrame with: Row, AbsRow, Col, ColName, CellAddress, Formula, ErrorType
+Public Function AuditFormulas() As cDataFrame
+    Dim auditDf As New cDataFrame
+    auditDf.AddColumn "Row"
+    auditDf.AddColumn "AbsRow"
+    auditDf.AddColumn "Col"
+    auditDf.AddColumn "ColName"
+    auditDf.AddColumn "CellAddress"
+    auditDf.AddColumn "Formula"
+    auditDf.AddColumn "ErrorType"
+
+    If mDataBodyRange Is Nothing Or mRowCount = 0 Then
+        Set AuditFormulas = auditDf
+        Exit Function
+    End If
+
+    ' Pre-fetch column names
+    Dim colNames() As String
+    ReDim colNames(1 To mColumnCount)
+    Dim c As Long, k As Variant
+    For c = 1 To mColumnCount
+        colNames(c) = "C" & CStr(c)
+    Next c
+    For Each k In mColIndexMap.Keys
+        Dim cPos As Long
+        cPos = mColIndexMap.Item(k)
+        If cPos >= 1 And cPos <= mColumnCount Then
+            If Left$(CStr(k), 1) <> "C" Or Not IsNumeric(Mid$(CStr(k), 2)) Then
+                colNames(cPos) = CStr(k)
+            End If
+        End If
+    Next k
+
+    Dim r As Long, cellObj As Object, cellVal As Variant
+    For r = 1 To mRowCount
+        For c = 1 To mColumnCount
+            Set cellObj = mDataBodyRange.Cells(r, c)
+            If cellObj.HasFormula Then
+                cellVal = cellObj.Value
+                If IsError(cellVal) Then
+                    Dim errStr As String
+                    errStr = ""
+                    On Error Resume Next
+                    errStr = CStr(cellObj.Text)
+                    On Error GoTo 0
+                    If Len(errStr) = 0 Then
+                        Dim errNum As Long
+                        errNum = CLng(cellVal)
+                        Select Case errNum
+                            Case 2007: errStr = "#DIV/0!"
+                            Case 2023: errStr = "#REF!"
+                            Case 2042: errStr = "#N/A"
+                            Case 2015: errStr = "#VALUE!"
+                            Case 2029: errStr = "#NAME?"
+                            Case 2036: errStr = "#NUM!"
+                            Case 2000: errStr = "#NULL!"
+                            Case Else: errStr = "#ERROR"
+                        End Select
+                    End If
+                    auditDf.AddRow r, cellObj.Row, c, colNames(c), cellObj.Address(False, False), CStr(cellObj.Formula), errStr
+                End If
+            End If
+        Next c
+    Next r
+
+    Set AuditFormulas = auditDf
+End Function
+
 ' ------------------------------------------------------------------------------
 ' Table-Driven Formula Engine
 ' ------------------------------------------------------------------------------
@@ -533,6 +817,20 @@ Public Function ApplyFormulasFromTable(ByVal FormulaTableOrDf As Variant, _
                 Me.SetRunningTotalFormula tgtKey, IIf(Len(sourceParam) > 0, sourceParam, fmlaStr)
             Case "SUMMARY", "TOTAL"
                 Me.SetSummaryFormula mRowCount + 1, tgtKey, IIf(Len(fmlaStr) > 0, fmlaStr, "SUM"), sourceParam
+            Case "PCT_TOTAL", "PERCENTAGE"
+                Me.SetPercentageOfTotal tgtKey, IIf(Len(sourceParam) > 0, sourceParam, fmlaStr)
+            Case "VARIANCE"
+                Dim vParts() As String
+                vParts = Split(fmlaStr, ",")
+                If UBound(vParts) >= 1 Then
+                    Me.SetVarianceFormula tgtKey, Trim$(vParts(0)), Trim$(vParts(1))
+                Else
+                    Me.SetVarianceFormula tgtKey, fmlaStr, sourceParam
+                End If
+            Case "IFERROR"
+                Me.SetIfErrorWrapper tgtKey, IIf(Len(fmlaStr) > 0, fmlaStr, 0)
+            Case "FREEZE"
+                Me.FreezeToValues tgtKey
             Case Else
                 ' Standard Formula (supports token replacement and AutoFill)
                 If Len(fmlaStr) > 0 Then
@@ -577,19 +875,34 @@ Public Function ParseFormulaTemplate(ByVal Template As String, _
     result = Replace(result, "{last_row}", CStr(lastRow), , , vbTextCompare)
     result = Replace(result, "{col}", targetColLetter, , , vbTextCompare)
 
-    ' Replace Named Column Tokens: [ColumnName] with relative cell reference
+    ' Replace Named Column Tokens: [ColumnName] or [@ColumnName]
     Dim colKey As Variant
     For Each colKey In mColIndexMap.Keys
         Dim cName As String
         cName = CStr(colKey)
         Dim tokenToFind As String
         tokenToFind = "[" & cName & "]"
-        If InStr(1, result, tokenToFind, vbTextCompare) > 0 Then
+        Dim atTokenToFind As String
+        atTokenToFind = "[@" & cName & "]"
+
+        If mUseStructuredReferences And Not (mListObject Is Nothing) Then
+            Dim structRef As String
+            structRef = "[@" & cName & "]"
+            If InStr(1, result, tokenToFind, vbTextCompare) > 0 Then
+                result = Replace(result, tokenToFind, structRef, , , vbTextCompare)
+            End If
+        Else
             Dim cIdx As Long
             cIdx = mColIndexMap.Item(colKey)
             Dim colLetter As String
             colLetter = ColIndexToLetter(mDataBodyRange.Column + cIdx - 1)
-            result = Replace(result, tokenToFind, colLetter & CStr(CurrentRow), , , vbTextCompare)
+
+            If InStr(1, result, tokenToFind, vbTextCompare) > 0 Then
+                result = Replace(result, tokenToFind, colLetter & CStr(CurrentRow), , , vbTextCompare)
+            End If
+            If InStr(1, result, atTokenToFind, vbTextCompare) > 0 Then
+                result = Replace(result, atTokenToFind, colLetter & CStr(CurrentRow), , , vbTextCompare)
+            End If
         End If
     Next colKey
 
@@ -665,6 +978,22 @@ End Property
 
 Public Property Get Worksheet() As Object
     Set Worksheet = mWorksheet
+End Property
+
+Public Property Get ListObject() As Object
+    Set ListObject = mListObject
+End Property
+
+Public Property Get IsListObject() As Boolean
+    IsListObject = Not (mListObject Is Nothing)
+End Property
+
+Public Property Get UseStructuredReferences() As Boolean
+    UseStructuredReferences = mUseStructuredReferences
+End Property
+
+Public Property Let UseStructuredReferences(ByVal Val As Boolean)
+    mUseStructuredReferences = Val
 End Property
 
 ' ------------------------------------------------------------------------------
