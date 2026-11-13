@@ -37,6 +37,10 @@ Private mRowCount As Long
 Private mColumnCount As Long
 Private mHasHeaders As Boolean
 Private mUseStructuredReferences As Boolean
+Private mInBatch As Boolean
+Private mPrevCalculation As Long
+Private mPrevScreenUpdating As Boolean
+Private mPrevEnableEvents As Boolean
 Private mColIndexMap As Object ' Scripting.Dictionary: Name/Key -> 1-based column index
 
 Private Sub Class_Initialize()
@@ -44,12 +48,21 @@ Private Sub Class_Initialize()
     mColumnCount = 0
     mHasHeaders = True
     mUseStructuredReferences = False
+    mInBatch = False
     Set mListObject = Nothing
     Set mColIndexMap = CreateObject("Scripting.Dictionary")
     mColIndexMap.CompareMode = 1 ' TextCompare (case-insensitive)
 End Sub
 
 Private Sub Class_Terminate()
+    If mInBatch Then
+        On Error Resume Next
+        Application.Calculation = mPrevCalculation
+        Application.ScreenUpdating = mPrevScreenUpdating
+        Application.EnableEvents = mPrevEnableEvents
+        mInBatch = False
+        On Error GoTo 0
+    End If
     Set mWorksheet = Nothing
     Set mTableRange = Nothing
     Set mHeaderRange = Nothing
@@ -215,12 +228,13 @@ End Function
 '   4. Col Letter Tokens: "{col}" -> letter of target column
 '   5. Direct R1C1 notation (if IsR1C1:=True or template starts with "=RC")
 ' If UseAutoFill is True, writes to top cell and performs native Excel AutoFill down to mRowCount.
-' If UseAutoFill is False, performs instant bulk Range.Formula assignment across the column.
+' If UseAutoFill is False, performs instant bulk Range.Formula assignment across the column (10-50x faster).
 Public Function SetColumnFormula(ByVal ColumnKey As Variant, _
                                  ByVal FormulaTemplate As String, _
                                  Optional ByVal UseAutoFill As Boolean = True, _
                                  Optional ByVal FillType As Long = 0, _
-                                 Optional ByVal IsR1C1 As Boolean = False) As cFormulaEngine
+                                 Optional ByVal IsR1C1 As Boolean = False, _
+                                 Optional ByVal PreferFormula2 As Boolean = False) As cFormulaEngine
     CheckAttached "SetColumnFormula"
     If mRowCount = 0 Then
         Set SetColumnFormula = Me
@@ -253,7 +267,7 @@ Public Function SetColumnFormula(ByVal ColumnKey As Variant, _
 
         Dim firstCell As Object
         Set firstCell = colDataRng.Cells(1, 1)
-        firstCell.Formula = parsedFirstFormula
+        SafeAssignFormula firstCell, parsedFirstFormula, PreferFormula2
 
         If mRowCount > 1 Then
             If UseAutoFill Then
@@ -262,16 +276,84 @@ Public Function SetColumnFormula(ByVal ColumnKey As Variant, _
                 If Err.Number <> 0 Then
                     Err.Clear
                     ' Fallback to bulk formula assignment if AutoFill is restricted
-                    colDataRng.Formula = parsedFirstFormula
+                    SafeAssignFormula colDataRng, parsedFirstFormula, PreferFormula2
                 End If
                 On Error GoTo 0
             Else
-                colDataRng.Formula = parsedFirstFormula
+                SafeAssignFormula colDataRng, parsedFirstFormula, PreferFormula2
             End If
         End If
     End If
 
     Set SetColumnFormula = Me
+End Function
+
+' Applies formula across an entire column using instant bulk Range.Formula write (10-50x faster than AutoFill).
+Public Function SetColumnFormulaBulk(ByVal ColumnKey As Variant, _
+                                     ByVal FormulaTemplate As String, _
+                                     Optional ByVal PreferFormula2 As Boolean = False) As cFormulaEngine
+    Set SetColumnFormulaBulk = SetColumnFormula(ColumnKey, FormulaTemplate, _
+                                                UseAutoFill:=False, _
+                                                PreferFormula2:=PreferFormula2)
+End Function
+
+' Injects a modern Dynamic Array formula (spill range, e.g. =UNIQUE(), =FILTER(), =SORT()) into an anchor cell.
+Public Function SetSpillFormula(ByVal AnchorCellOrColKey As Variant, _
+                                ByVal FormulaTemplate As String, _
+                                Optional ByVal PreferFormula2 As Boolean = True) As cFormulaEngine
+    CheckAttached "SetSpillFormula"
+
+    Dim anchorCell As Object
+    Dim absRow As Long, cIdx As Long
+
+    If IsObject(AnchorCellOrColKey) Then
+        Set anchorCell = AnchorCellOrColKey
+        absRow = anchorCell.Row
+        cIdx = 1
+    Else
+        cIdx = ResolveColIndex(AnchorCellOrColKey)
+        Set anchorCell = mDataBodyRange.Cells(1, cIdx)
+        absRow = anchorCell.Row
+    End If
+
+    Dim cleanTmpl As String
+    cleanTmpl = Trim$(FormulaTemplate)
+    If Left$(cleanTmpl, 1) = "'" Then cleanTmpl = Trim$(Mid$(cleanTmpl, 2))
+    If Left$(cleanTmpl, 1) <> "=" Then cleanTmpl = "=" & cleanTmpl
+
+    Dim parsedFormula As String
+    parsedFormula = ParseFormulaTemplate(cleanTmpl, cIdx, absRow)
+
+    SafeAssignFormula anchorCell, parsedFormula, PreferFormula2
+    On Error Resume Next
+    anchorCell.Calculate
+    On Error GoTo 0
+
+    Set SetSpillFormula = Me
+End Function
+
+' Retrieves the dynamic Spill Range originating from an anchor cell, or the anchor cell itself if not spilling.
+Public Function GetSpillRange(ByVal AnchorCellOrColKey As Variant) As Object
+    CheckAttached "GetSpillRange"
+    Dim anchorCell As Object
+    If IsObject(AnchorCellOrColKey) Then
+        Set anchorCell = AnchorCellOrColKey
+    Else
+        Dim cIdx As Long
+        cIdx = ResolveColIndex(AnchorCellOrColKey)
+        Set anchorCell = mDataBodyRange.Cells(1, cIdx)
+    End If
+
+    Dim spillRng As Object
+    On Error Resume Next
+    Set spillRng = anchorCell.SpillingToRange
+    On Error GoTo 0
+
+    If spillRng Is Nothing Then
+        Set GetSpillRange = anchorCell
+    Else
+        Set GetSpillRange = spillRng
+    End If
 End Function
 
 ' Sets a formula directly using R1C1 notation across an entire column.
@@ -745,6 +827,214 @@ Public Function AuditFormulas() As cDataFrame
     Set AuditFormulas = auditDf
 End Function
 
+' Traces column and cell precedents for a formula cell.
+' Returns an array of referenced column names (e.g. Array("Qty", "Price")).
+Public Function GetPrecedents(ByVal ColumnKey As Variant, Optional ByVal RowIndex As Long = 1) As Variant
+    CheckAttached "GetPrecedents"
+    Dim cIdx As Long
+    cIdx = ResolveColIndex(ColumnKey)
+    Dim cellObj As Object
+    Set cellObj = mDataBodyRange.Cells(RowIndex, cIdx)
+
+    Dim fmlaStr As String
+    fmlaStr = Trim$(CStr(cellObj.Formula))
+    If Len(fmlaStr) = 0 Then
+        GetPrecedents = Array()
+        Exit Function
+    End If
+
+    Dim foundDict As Object
+    Set foundDict = CreateObject("Scripting.Dictionary")
+    foundDict.CompareMode = 1
+
+    ' 1. Check named columns in mColIndexMap
+    Dim k As Variant
+    For Each k In mColIndexMap.Keys
+        Dim cName As String
+        cName = CStr(k)
+        Dim colPos As Long
+        colPos = mColIndexMap.Item(k)
+        Dim cLetter As String
+        cLetter = ColIndexToLetter(mDataBodyRange.Column + colPos - 1)
+
+        If InStr(1, fmlaStr, "[" & cName & "]", vbTextCompare) > 0 Or _
+           InStr(1, fmlaStr, "[@" & cName & "]", vbTextCompare) > 0 Or _
+           InStr(1, fmlaStr, cLetter & CStr(cellObj.Row), vbTextCompare) > 0 Or _
+           InStr(1, fmlaStr, cLetter & "$" & CStr(cellObj.Row), vbTextCompare) > 0 Then
+            If Left$(cName, 1) <> "C" Or Not IsNumeric(Mid$(cName, 2)) Then
+                If Not foundDict.Exists(cName) Then foundDict.Add cName, colPos
+            End If
+        End If
+    Next k
+
+    ' 2. Check native DirectPrecedents on same worksheet
+    On Error Resume Next
+    Dim precRange As Object
+    Set precRange = cellObj.DirectPrecedents
+    On Error GoTo 0
+    If Not precRange Is Nothing Then
+        Dim precArea As Object, pCell As Object
+        For Each precArea In precRange.Areas
+            For Each pCell In precArea.Cells
+                Dim pCol As Long
+                pCol = pCell.Column - mDataBodyRange.Column + 1
+                If pCol >= 1 And pCol <= mColumnCount Then
+                    For Each k In mColIndexMap.Keys
+                        If mColIndexMap.Item(k) = pCol Then
+                            If Left$(CStr(k), 1) <> "C" Or Not IsNumeric(Mid$(CStr(k), 2)) Then
+                                If Not foundDict.Exists(CStr(k)) Then foundDict.Add CStr(k), pCol
+                            End If
+                        End If
+                    Next k
+                End If
+            Next pCell
+        Next precArea
+    End If
+
+    If foundDict.Count = 0 Then
+        GetPrecedents = Array()
+    Else
+        GetPrecedents = foundDict.Keys
+    End If
+End Function
+
+' Evaluates an Excel formula expression in memory (optionally resolving column tokens [ColName] to ranges).
+' Returns scalar value, 1D array, or 2D array computed by Excel calculation engine without modifying grid.
+Public Function Evaluate(ByVal Expression As String) As Variant
+    CheckAttached "Evaluate"
+    Dim parsedExpr As String
+    parsedExpr = Trim$(Expression)
+    If Left$(parsedExpr, 1) = "=" Then parsedExpr = Mid$(parsedExpr, 2)
+
+    Dim rFirst As Long, rLast As Long
+    rFirst = mDataBodyRange.Row
+    rLast = mDataBodyRange.Row + mRowCount - 1
+
+    Dim k As Variant
+    For Each k In mColIndexMap.Keys
+        Dim cName As String
+        cName = CStr(k)
+        Dim tokenToFind As String
+        tokenToFind = "[" & cName & "]"
+        If InStr(1, parsedExpr, tokenToFind, vbTextCompare) > 0 Then
+            Dim cIdx As Long
+            cIdx = mColIndexMap.Item(k)
+            Dim colLetter As String
+            colLetter = ColIndexToLetter(mDataBodyRange.Column + cIdx - 1)
+            Dim colRangeRef As String
+            colRangeRef = colLetter & CStr(rFirst) & ":" & colLetter & CStr(rLast)
+            parsedExpr = Replace(parsedExpr, tokenToFind, colRangeRef, , , vbTextCompare)
+        End If
+    Next k
+
+    parsedExpr = Replace(parsedExpr, "{first_row}", CStr(rFirst), , , vbTextCompare)
+    parsedExpr = Replace(parsedExpr, "{last_row}", CStr(rLast), , , vbTextCompare)
+
+    Dim evalResult As Variant
+    If Not mWorksheet Is Nothing Then
+        evalResult = mWorksheet.Evaluate(parsedExpr)
+    Else
+        evalResult = Application.Evaluate(parsedExpr)
+    End If
+
+    If IsObject(evalResult) Then
+        Set Evaluate = evalResult
+    Else
+        Evaluate = evalResult
+    End If
+End Function
+
+' Evaluates a formula in memory and packs the output into a cDataFrame.
+Public Function EvaluateToDataFrame(ByVal Expression As String, _
+                                    Optional ByVal ResultColName As String = "Result") As cDataFrame
+    Dim df As New cDataFrame
+    Dim res As Variant
+    res = Me.Evaluate(Expression)
+
+    If IsArray(res) Then
+        Dim cDim As Long
+        cDim = 0
+        On Error Resume Next
+        cDim = UBound(res, 2) - LBound(res, 2) + 1
+        On Error GoTo 0
+
+        If cDim > 1 Then
+            Dim c As Long
+            For c = 1 To cDim
+                df.AddColumn ResultColName & "_" & CStr(c)
+            Next c
+            df.AddRows res
+        Else
+            df.AddColumn ResultColName
+            Dim r As Long
+            For r = LBound(res, 1) To UBound(res, 1)
+                df.AddRow res(r, LBound(res, 2))
+            Next r
+        End If
+    Else
+        df.AddColumn ResultColName
+        df.AddRow res
+    End If
+
+    Set EvaluateToDataFrame = df
+End Function
+
+' Begins a high-performance batch session: disables ScreenUpdating, Events, and sets Calculation=Manual.
+Public Function BeginBatch() As cFormulaEngine
+    If Not mInBatch Then
+        On Error Resume Next
+        mPrevCalculation = Application.Calculation
+        mPrevScreenUpdating = Application.ScreenUpdating
+        mPrevEnableEvents = Application.EnableEvents
+        Application.Calculation = -4135 ' xlCalculationManual
+        Application.ScreenUpdating = False
+        Application.EnableEvents = False
+        mInBatch = True
+        On Error GoTo 0
+    End If
+    Set BeginBatch = Me
+End Function
+
+' Ends batch session: recalculates table range and restores Calculation/ScreenUpdating/Events safely.
+Public Function EndBatch(Optional ByVal CalculateNow As Boolean = True) As cFormulaEngine
+    If mInBatch Then
+        On Error Resume Next
+        If CalculateNow Then
+            If Not mTableRange Is Nothing Then
+                mTableRange.Calculate
+            Else
+                Application.Calculate
+            End If
+        End If
+        Application.Calculation = mPrevCalculation
+        Application.ScreenUpdating = mPrevScreenUpdating
+        Application.EnableEvents = mPrevEnableEvents
+        mInBatch = False
+        On Error GoTo 0
+    End If
+    Set EndBatch = Me
+End Function
+
+Public Property Get InBatch() As Boolean
+    InBatch = mInBatch
+End Property
+
+Private Sub SafeAssignFormula(ByVal TargetRange As Object, _
+                              ByVal FormulaStr As String, _
+                              Optional ByVal PreferFormula2 As Boolean = False)
+    If PreferFormula2 Then
+        On Error Resume Next
+        TargetRange.Formula2 = FormulaStr
+        If Err.Number <> 0 Then
+            Err.Clear
+            TargetRange.Formula = FormulaStr
+        End If
+        On Error GoTo 0
+    Else
+        TargetRange.Formula = FormulaStr
+    End If
+End Sub
+
 ' ------------------------------------------------------------------------------
 ' Table-Driven Formula Engine
 ' ------------------------------------------------------------------------------
@@ -831,6 +1121,10 @@ Public Function ApplyFormulasFromTable(ByVal FormulaTableOrDf As Variant, _
                 Me.SetIfErrorWrapper tgtKey, IIf(Len(fmlaStr) > 0, fmlaStr, 0)
             Case "FREEZE"
                 Me.FreezeToValues tgtKey
+            Case "SPILL"
+                Me.SetSpillFormula tgtKey, fmlaStr, PreferFormula2:=True
+            Case "BULK"
+                Me.SetColumnFormulaBulk tgtKey, fmlaStr
             Case Else
                 ' Standard Formula (supports token replacement and AutoFill)
                 If Len(fmlaStr) > 0 Then
