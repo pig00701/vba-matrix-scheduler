@@ -1221,6 +1221,669 @@ Public Function GetPrecedents(ByVal ColumnKey As Variant, Optional ByVal RowInde
     End If
 End Function
 
+' ------------------------------------------------------------------------------
+' Advanced Formula Diagnostics, Auto-Heal, Long Array & Formatting Engine
+' ------------------------------------------------------------------------------
+
+' Scans the table (or a specific column) for overwritten formulas (hardcoded constants)
+' or R1C1 pattern mismatches compared to the column's dominant formula pattern.
+Public Function AuditFormulaInconsistency(Optional ColumnKey As Variant) As cDataFrame
+    On Error GoTo CatchErr
+    CheckAttached "AuditFormulaInconsistency"
+
+    Dim incDf As New cDataFrame
+    incDf.AddColumn "Address"
+    incDf.AddColumn "RowIndex"
+    incDf.AddColumn "Column"
+    incDf.AddColumn "Issue"
+    incDf.AddColumn "ExpectedPattern"
+    incDf.AddColumn "ActualFormula"
+    incDf.AddColumn "ActualValue"
+
+    If mRowCount = 0 Or mDataBodyRange Is Nothing Then
+        Set AuditFormulaInconsistency = incDf
+        Exit Function
+    End If
+
+    Dim startCol As Long, endCol As Long
+    If IsMissing(ColumnKey) Or IsEmpty(ColumnKey) Then
+        startCol = 1
+        endCol = mColumnCount
+    Else
+        startCol = ResolveColIndex(ColumnKey)
+        endCol = startCol
+    End If
+
+    Dim cIdx As Long, r As Long
+    Dim patDict As Object
+    Dim cellObj As Object
+    Dim r1c1Str As String, domPattern As String
+    Dim maxCount As Long, fmlaCount As Long
+    Dim colLabel As String, valStr As String
+
+    For cIdx = startCol To endCol
+        Set patDict = CreateObject("Scripting.Dictionary")
+        fmlaCount = 0
+
+        For r = 1 To mRowCount
+            Set cellObj = mDataBodyRange.Cells(r, cIdx)
+            If cellObj.HasFormula Then
+                fmlaCount = fmlaCount + 1
+                r1c1Str = CStr(cellObj.FormulaR1C1)
+                If patDict.Exists(r1c1Str) Then
+                    patDict.Item(r1c1Str) = patDict.Item(r1c1Str) + 1
+                Else
+                    patDict.Add r1c1Str, 1
+                End If
+            End If
+        Next r
+
+        ' Only audit columns that are formula columns (have at least 1 formula)
+        If fmlaCount > 0 Then
+            domPattern = ""
+            maxCount = 0
+            Dim k As Variant
+            For Each k In patDict.Keys
+                If patDict.Item(k) > maxCount Then
+                    maxCount = patDict.Item(k)
+                    domPattern = CStr(k)
+                End If
+            Next k
+
+            colLabel = GetColNameByIndex(cIdx)
+            For r = 1 To mRowCount
+                Set cellObj = mDataBodyRange.Cells(r, cIdx)
+                If IsError(cellObj.Value) Then
+                    valStr = "#ERROR"
+                Else
+                    valStr = CStr(cellObj.Value)
+                End If
+
+                If Not cellObj.HasFormula Then
+                    Dim issueType As String
+                    If Len(Trim$(valStr)) = 0 Then
+                        issueType = "MISSING_FORMULA"
+                    Else
+                        issueType = "OVERWRITTEN_WITH_CONSTANT"
+                    End If
+                    incDf.AddRow cellObj.Address(False, False), r, colLabel, issueType, domPattern, "", valStr
+                ElseIf CStr(cellObj.FormulaR1C1) <> domPattern Then
+                    incDf.AddRow cellObj.Address(False, False), r, colLabel, "PATTERN_MISMATCH", domPattern, CStr(cellObj.Formula), valStr
+                End If
+            Next r
+        End If
+    Next cIdx
+
+    Set AuditFormulaInconsistency = incDf
+    Exit Function
+
+CatchErr:
+    Set AuditFormulaInconsistency = incDf
+End Function
+
+' Auto-heals a formula column by re-propagating the reference R1C1 pattern down all rows.
+' Returns the number of cells restored.
+Public Function RestoreColumnFormulas(ByVal ColumnKey As Variant, _
+                                      Optional ByVal ForceFromTop As Boolean = True) As Long
+    CheckAttached "RestoreColumnFormulas"
+    If mRowCount = 0 Then Exit Function
+
+    Dim cIdx As Long
+    cIdx = ResolveColIndex(ColumnKey)
+
+    Dim refPattern As String
+    refPattern = ""
+
+    If ForceFromTop Then
+        If mDataBodyRange.Cells(1, cIdx).HasFormula Then
+            refPattern = CStr(mDataBodyRange.Cells(1, cIdx).FormulaR1C1)
+        End If
+    End If
+
+    If Len(refPattern) = 0 Then
+        Dim patDict As Object
+        Set patDict = CreateObject("Scripting.Dictionary")
+        Dim r As Long, cellObj As Object, r1c1Str As String
+        For r = 1 To mRowCount
+            Set cellObj = mDataBodyRange.Cells(r, cIdx)
+            If cellObj.HasFormula Then
+                r1c1Str = CStr(cellObj.FormulaR1C1)
+                If patDict.Exists(r1c1Str) Then
+                    patDict.Item(r1c1Str) = patDict.Item(r1c1Str) + 1
+                Else
+                    patDict.Add r1c1Str, 1
+                End If
+            End If
+        Next r
+        Dim maxCnt As Long, k As Variant
+        maxCnt = 0
+        For Each k In patDict.Keys
+            If patDict.Item(k) > maxCnt Then
+                maxCnt = patDict.Item(k)
+                refPattern = CStr(k)
+            End If
+        Next k
+    End If
+
+    If Len(refPattern) = 0 Then Exit Function
+
+    Dim restored As Long
+    restored = 0
+    Dim rIdx As Long
+    For rIdx = 1 To mRowCount
+        Set cellObj = mDataBodyRange.Cells(rIdx, cIdx)
+        If Not cellObj.HasFormula Or CStr(cellObj.FormulaR1C1) <> refPattern Then
+            restored = restored + 1
+        End If
+    Next rIdx
+
+    If restored > 0 Then
+        mDataBodyRange.Columns(cIdx).FormulaR1C1 = refPattern
+    End If
+
+    RestoreColumnFormulas = restored
+End Function
+
+' Bypasses Excel's 255-character limit on Range.FormulaArray by chunk-replacing
+' long sub-expressions via temporary valid cell placeholder tokens (e.g., Z9991).
+Public Function SetColumnFormulaArrayLong(ByVal ColumnKey As Variant, _
+                                          ByVal FormulaTemplate As String) As cFormulaEngine
+    CheckAttached "SetColumnFormulaArrayLong"
+    If mRowCount = 0 Then
+        Set SetColumnFormulaArrayLong = Me
+        Exit Function
+    End If
+
+    Dim cIdx As Long
+    cIdx = ResolveColIndex(ColumnKey)
+
+    Dim cleanTmpl As String
+    cleanTmpl = Trim$(FormulaTemplate)
+    If Left$(cleanTmpl, 1) = "'" Then cleanTmpl = Trim$(Mid$(cleanTmpl, 2))
+    If Left$(cleanTmpl, 1) <> "=" Then cleanTmpl = "=" & cleanTmpl
+
+    Dim r As Long, targetRow As Long
+    Dim parsedFmla As String
+    Dim targetCell As Object
+
+    Dim xlApp As Object
+    Set xlApp = mWorksheet.Application
+
+    For r = 1 To mRowCount
+        targetRow = mDataBodyRange.Row + r - 1
+        parsedFmla = ParseFormulaTemplate(cleanTmpl, cIdx, targetRow)
+        Set targetCell = mDataBodyRange.Cells(r, cIdx)
+
+        If Len(parsedFmla) <= 80 Then
+            Dim r1c1Short As Variant
+            r1c1Short = xlApp.ConvertFormula(parsedFmla, 1, -4150, 4, targetCell)
+            If Not IsError(r1c1Short) Then
+                targetCell.FormulaArray = CStr(r1c1Short)
+            Else
+                AssignLongArrayFormula targetCell, parsedFmla, xlApp
+            End If
+        Else
+            AssignLongArrayFormula targetCell, parsedFmla, xlApp
+        End If
+    Next r
+
+    Set SetColumnFormulaArrayLong = Me
+End Function
+
+Private Sub AssignLongArrayFormula(ByVal TargetCell As Object, ByVal LongFormula As String, ByVal xlApp As Object)
+    ' Split LongFormula into chunks <= 200 chars using valid cell reference tokens (Z9991, Z9992, ...)
+    Dim chunks() As String
+    Dim tokens() As String
+    Dim chunkCount As Long
+    chunkCount = 0
+
+    Dim remStr As String
+    remStr = LongFormula
+
+    ' If formula <= 255, assign directly
+    If Len(remStr) <= 255 Then
+        TargetCell.FormulaArray = remStr
+        Exit Sub
+    End If
+
+    ' Extract tail chunks at safe top-level operator boundaries (+, -, *, /, &) outside quotes
+    Dim baseStr As String
+    baseStr = remStr
+
+    Dim tokenIdx As Long
+    tokenIdx = 1
+
+    Do While Len(baseStr) > 90 And tokenIdx <= 30
+        Dim splitPos As Long
+        splitPos = FindSafeFormulaSplit(baseStr, 80)
+        If splitPos <= 1 Then Exit Do
+
+        Dim tok As String
+        tok = "Z999" & CStr(tokenIdx)
+        Dim tailPart As String
+        tailPart = Mid$(baseStr, splitPos + 1)
+
+        chunkCount = chunkCount + 1
+        ReDim Preserve chunks(1 To chunkCount)
+        ReDim Preserve tokens(1 To chunkCount)
+        chunks(chunkCount) = tailPart
+        tokens(chunkCount) = tok
+
+        baseStr = Left$(baseStr, splitPos) & tok
+        tokenIdx = tokenIdx + 1
+    Loop
+
+    ' If still > 255 (e.g. deeply nested without top-level operators), split inside inner parens
+    If Len(baseStr) > 255 Then
+        ' Fallback: replace inner long parenthesized expression with Z9999
+        Dim openP As Long, closeP As Long
+        openP = InStr(1, baseStr, "(")
+        If openP > 0 Then
+            Dim innerOpen As Long
+            innerOpen = InStr(openP + 1, baseStr, "(")
+            If innerOpen > 0 And innerOpen < 150 Then
+                closeP = FindMatchingParen(baseStr, innerOpen)
+                If closeP > innerOpen And (closeP - innerOpen) <= 200 Then
+                    Dim subExpr As String
+                    subExpr = Mid$(baseStr, innerOpen + 1, closeP - innerOpen - 1)
+                    chunkCount = chunkCount + 1
+                    ReDim Preserve chunks(1 To chunkCount)
+                    ReDim Preserve tokens(1 To chunkCount)
+                    chunks(chunkCount) = subExpr
+                    tokens(chunkCount) = "Z9999"
+                    baseStr = Left$(baseStr, innerOpen) & "Z9999" & Mid$(baseStr, closeP)
+                End If
+            End If
+        End If
+    End If
+
+    Dim baseR1C1 As String
+    baseR1C1 = CStr(xlApp.ConvertFormula(baseStr, 1, -4150, 4, TargetCell))
+    TargetCell.FormulaArray = baseR1C1
+
+    ' Replace tokens in reverse order (LIFO) so nested/chained chunks expand cleanly
+    Dim i As Long
+    For i = chunkCount To 1 Step -1
+        If Len(chunks(i)) <= 180 Then
+            TargetCell.Replace What:=tokens(i), Replacement:=chunks(i), LookAt:=2, MatchCase:=False
+        Else
+            ' Sub-split chunk if still > 240
+            Dim subS As String
+            subS = chunks(i)
+            Dim subTok As String
+            subTok = "Z998" & CStr(i)
+            Dim sp As Long
+            sp = FindSafeFormulaSplit(subS, 200)
+            If sp > 1 Then
+                Dim partA As String, partB As String
+                partA = Left$(subS, sp) & subTok
+                partB = Mid$(subS, sp + 1)
+                TargetCell.Replace What:=tokens(i), Replacement:=partA, LookAt:=2, MatchCase:=False
+                TargetCell.Replace What:=subTok, Replacement:=partB, LookAt:=2, MatchCase:=False
+            Else
+                TargetCell.Replace What:=tokens(i), Replacement:=subS, LookAt:=2, MatchCase:=False
+            End If
+        End If
+    Next i
+End Sub
+
+Private Function FindSafeFormulaSplit(ByVal FormulaStr As String, ByVal MaxLeftLen As Long) As Long
+    Dim i As Long, n As Long
+    Dim ch As String
+    Dim inQuotes As Boolean
+    Dim lastSafe As Long
+
+    n = Len(FormulaStr)
+    If n <= MaxLeftLen Then
+        FindSafeFormulaSplit = 0
+        Exit Function
+    End If
+
+    lastSafe = 0
+    inQuotes = False
+    For i = 2 To MaxLeftLen
+        ch = Mid$(FormulaStr, i, 1)
+        If ch = Chr$(34) Then
+            inQuotes = Not inQuotes
+        ElseIf Not inQuotes Then
+            If ch = "+" Or ch = "-" Or ch = "*" Or ch = "/" Or ch = "&" Then
+                lastSafe = i
+            End If
+        End If
+    Next i
+    FindSafeFormulaSplit = lastSafe
+End Function
+
+Private Function FindMatchingParen(ByVal S As String, ByVal OpenPos As Long) As Long
+    Dim i As Long, depth As Long, ch As String, inQuotes As Boolean
+    depth = 0
+    inQuotes = False
+    For i = OpenPos To Len(S)
+        ch = Mid$(S, i, 1)
+        If ch = Chr$(34) Then
+            inQuotes = Not inQuotes
+        ElseIf Not inQuotes Then
+            If ch = "(" Then
+                depth = depth + 1
+            ElseIf ch = ")" Then
+                depth = depth - 1
+                If depth = 0 Then
+                    FindMatchingParen = i
+                    Exit Function
+                End If
+            End If
+        End If
+    Next i
+    FindMatchingParen = 0
+End Function
+
+' Converts formula cell references between Absolute/Relative locking styles using Application.ConvertFormula.
+' ToAbsoluteType: 1 = xlAbsolute ($A$1), 2 = xlAbsRowRelColumn (A$1), 3 = xlRelRowAbsColumn ($A1), 4 = xlRelative (A1).
+Public Function ConvertFormulaReferences(Optional ColumnKey As Variant, _
+                                         Optional ByVal ToAbsoluteType As Long = 1) As cFormulaEngine
+    CheckAttached "ConvertFormulaReferences"
+    If mRowCount = 0 Then
+        Set ConvertFormulaReferences = Me
+        Exit Function
+    End If
+
+    If ToAbsoluteType < 1 Or ToAbsoluteType > 4 Then
+        Err.Raise 5, "cFormulaEngine.ConvertFormulaReferences", "ToAbsoluteType must be 1 (Absolute), 2 (AbsRowRelCol), 3 (RelRowAbsCol), or 4 (Relative)."
+    End If
+
+    Dim targetRng As Object
+    If IsMissing(ColumnKey) Or IsEmpty(ColumnKey) Then
+        Set targetRng = mDataBodyRange
+    Else
+        Set targetRng = mDataBodyRange.Columns(ResolveColIndex(ColumnKey))
+    End If
+
+    Dim xlApp As Object
+    Set xlApp = mWorksheet.Application
+
+    Dim cellObj As Object
+    Dim convFmla As String
+    For Each cellObj In targetRng.Cells
+        If cellObj.HasFormula Then
+            convFmla = CStr(xlApp.ConvertFormula(Formula:=cellObj.Formula, _
+                                                  FromReferenceStyle:=1, _
+                                                  ToReferenceStyle:=1, _
+                                                  ToAbsolute:=ToAbsoluteType, _
+                                                  RelativeTo:=cellObj))
+            cellObj.Formula = convFmla
+        End If
+    Next cellObj
+
+    Set ConvertFormulaReferences = Me
+End Function
+
+' Traces downstream dependents for a cell/column within the attached table and sheet.
+' Returns a 1D Variant array of dependent column names (or empty Array() if none).
+Public Function GetDependents(ByVal ColumnKey As Variant, Optional ByVal RowIndex As Long = 1) As Variant
+    CheckAttached "GetDependents"
+    Dim cIdx As Long
+    cIdx = ResolveColIndex(ColumnKey)
+
+    Dim targetCell As Object
+    Set targetCell = mDataBodyRange.Cells(RowIndex, cIdx)
+
+    Dim tLetter As String, tRow As String, tColName As String
+    tLetter = ColIndexToLetter(targetCell.Column)
+    tRow = CStr(targetCell.Row)
+    tColName = GetColNameByIndex(cIdx)
+
+    Dim foundDict As Object
+    Set foundDict = CreateObject("Scripting.Dictionary")
+    foundDict.CompareMode = 1
+
+    ' 1. Scan all other columns in mDataBodyRange at RowIndex
+    Dim otherIdx As Long
+    Dim otherCell As Object
+    Dim fmlaStr As String, otherName As String
+
+    For otherIdx = 1 To mColumnCount
+        If otherIdx <> cIdx Then
+            Set otherCell = mDataBodyRange.Cells(RowIndex, otherIdx)
+            If otherCell.HasFormula Then
+                fmlaStr = CStr(otherCell.Formula)
+                If ContainsCellOrColRef(fmlaStr, tLetter, tRow, tColName) Then
+                    otherName = GetColNameByIndex(otherIdx)
+                    If Not foundDict.Exists(otherName) Then foundDict.Add otherName, otherIdx
+                End If
+            End If
+        End If
+    Next otherIdx
+
+    ' 2. Supplement with native DirectDependents on same worksheet
+    On Error Resume Next
+    Dim depRange As Object
+    Set depRange = targetCell.DirectDependents
+    On Error GoTo 0
+    If Not depRange Is Nothing Then
+        Dim depArea As Object, dCell As Object, dCol As Long, dName As String
+        For Each depArea In depRange.Areas
+            For Each dCell In depArea.Cells
+                dCol = dCell.Column - mDataBodyRange.Column + 1
+                If dCol >= 1 And dCol <= mColumnCount And dCol <> cIdx Then
+                    dName = GetColNameByIndex(dCol)
+                    If Not foundDict.Exists(dName) Then foundDict.Add dName, dCol
+                End If
+            Next dCell
+        Next depArea
+    End If
+
+    If foundDict.Count = 0 Then
+        GetDependents = Array()
+    Else
+        GetDependents = foundDict.Keys
+    End If
+End Function
+
+Private Function ContainsCellOrColRef(ByVal FormulaStr As String, _
+                                      ByVal ColLetter As String, _
+                                      ByVal RowStr As String, _
+                                      ByVal ColName As String) As Boolean
+    If Len(ColName) > 0 Then
+        If InStr(1, FormulaStr, "[" & ColName & "]", vbTextCompare) > 0 Or _
+           InStr(1, FormulaStr, "[@" & ColName & "]", vbTextCompare) > 0 Then
+            ContainsCellOrColRef = True
+            Exit Function
+        End If
+    End If
+
+    Dim patterns(1 To 4) As String
+    patterns(1) = ColLetter & RowStr
+    patterns(2) = "$" & ColLetter & RowStr
+    patterns(3) = ColLetter & "$" & RowStr
+    patterns(4) = "$" & ColLetter & "$" & RowStr
+
+    Dim p As Long, pos As Long, endPos As Long, nextCh As String, prevCh As String
+    For p = 1 To 4
+        pos = InStr(1, FormulaStr, patterns(p), vbTextCompare)
+        Do While pos > 0
+            prevCh = ""
+            If pos > 1 Then prevCh = Mid$(FormulaStr, pos - 1, 1)
+            endPos = pos + Len(patterns(p))
+            nextCh = ""
+            If endPos <= Len(FormulaStr) Then nextCh = Mid$(FormulaStr, endPos, 1)
+
+            ' Ensure boundary is not part of another letter/digit (e.g. A1 inside AA10)
+            Dim prevValid As Boolean, nextValid As Boolean
+            prevValid = (Len(prevCh) = 0) Or Not ((prevCh >= "A" And prevCh <= "Z") Or (prevCh >= "a" And prevCh <= "z") Or (prevCh >= "0" And prevCh <= "9"))
+            nextValid = (Len(nextCh) = 0) Or Not ((nextCh >= "0" And nextCh <= "9") Or (nextCh >= "A" And nextCh <= "Z") Or (nextCh >= "a" And nextCh <= "z"))
+
+            If prevValid And nextValid Then
+                ContainsCellOrColRef = True
+                Exit Function
+            End If
+            pos = InStr(pos + 1, FormulaStr, patterns(p), vbTextCompare)
+        Loop
+    Next p
+End Function
+
+' Audits the table for formula columns that are not referenced by any other column in the table.
+Public Function AuditOrphanFormulas() As cDataFrame
+    On Error GoTo CatchErr
+    CheckAttached "AuditOrphanFormulas"
+
+    Dim orphDf As New cDataFrame
+    orphDf.AddColumn "ColIndex"
+    orphDf.AddColumn "Column"
+    orphDf.AddColumn "FormulaCount"
+    orphDf.AddColumn "DependentCount"
+    orphDf.AddColumn "Severity"
+    orphDf.AddColumn "Suggestion"
+
+    If mRowCount = 0 Or mDataBodyRange Is Nothing Then
+        Set AuditOrphanFormulas = orphDf
+        Exit Function
+    End If
+
+    Dim cIdx As Long, r As Long, fmlaCnt As Long
+    Dim deps As Variant, depCnt As Long
+
+    For cIdx = 1 To mColumnCount
+        fmlaCnt = 0
+        For r = 1 To mRowCount
+            If mDataBodyRange.Cells(r, cIdx).HasFormula Then fmlaCnt = fmlaCnt + 1
+        Next r
+
+        If fmlaCnt > 0 Then
+            deps = GetDependents(cIdx, 1)
+            If UBound(deps) < LBound(deps) Then
+                depCnt = 0
+            Else
+                depCnt = UBound(deps) - LBound(deps) + 1
+            End If
+
+            If depCnt = 0 Then
+                orphDf.AddRow cIdx, GetColNameByIndex(cIdx), fmlaCnt, 0, "INFO", _
+                              "Formula column has 0 downstream table dependents (verify if intended as final output)."
+            End If
+        End If
+    Next cIdx
+
+    Set AuditOrphanFormulas = orphDf
+    Exit Function
+
+CatchErr:
+    Set AuditOrphanFormulas = orphDf
+End Function
+
+' Formats complex nested formulas with indentation and line breaks (vbLf) for readability
+' in Excel's formula bar without altering calculation semantics.
+Public Function FormatFormula(ByVal FormulaStr As String, Optional ByVal IndentSpaces As Long = 4) As String
+    Dim src As String
+    src = Trim$(FormulaStr)
+    If Len(src) = 0 Then Exit Function
+
+    Dim i As Long, n As Long, ch As String
+    Dim depth As Long
+    Dim inQuotes As Boolean
+    Dim expandStack() As Boolean
+    Dim stackTop As Long
+    Dim outStr As String
+
+    n = Len(src)
+    ReDim expandStack(1 To 100)
+    stackTop = 0
+    depth = 0
+    inQuotes = False
+    outStr = ""
+
+    For i = 1 To n
+        ch = Mid$(src, i, 1)
+        If ch = Chr$(34) Then
+            inQuotes = Not inQuotes
+            outStr = outStr & ch
+        ElseIf Not inQuotes Then
+            If ch = "(" Then
+                Dim shouldExpand As Boolean
+                shouldExpand = HasNestedOrComma(src, i)
+                stackTop = stackTop + 1
+                If stackTop > UBound(expandStack) Then ReDim Preserve expandStack(1 To stackTop + 50)
+                expandStack(stackTop) = shouldExpand
+                outStr = outStr & "("
+                If shouldExpand Then
+                    depth = depth + 1
+                    outStr = outStr & vbLf & Space$(depth * IndentSpaces)
+                End If
+            ElseIf ch = "," Then
+                If stackTop > 0 And expandStack(stackTop) Then
+                    outStr = outStr & "," & vbLf & Space$(depth * IndentSpaces)
+                    ' Skip immediate following spaces
+                    Do While i < n And Mid$(src, i + 1, 1) = " "
+                        i = i + 1
+                    Loop
+                Else
+                    outStr = outStr & ","
+                End If
+            ElseIf ch = ")" Then
+                Dim wasExpanded As Boolean
+                wasExpanded = False
+                If stackTop > 0 Then
+                    wasExpanded = expandStack(stackTop)
+                    stackTop = stackTop - 1
+                End If
+                If wasExpanded Then
+                    If depth > 0 Then depth = depth - 1
+                    outStr = outStr & vbLf & Space$(depth * IndentSpaces) & ")"
+                Else
+                    outStr = outStr & ")"
+                End If
+            Else
+                outStr = outStr & ch
+            End If
+        Else
+            outStr = outStr & ch
+        End If
+    Next i
+
+    FormatFormula = outStr
+End Function
+
+Private Function HasNestedOrComma(ByVal S As String, ByVal OpenPos As Long) As Boolean
+    Dim i As Long, depth As Long, ch As String, inQuotes As Boolean
+    depth = 1
+    inQuotes = False
+    For i = OpenPos + 1 To Len(S)
+        ch = Mid$(S, i, 1)
+        If ch = Chr$(34) Then
+            inQuotes = Not inQuotes
+        ElseIf Not inQuotes Then
+            If ch = "(" Then
+                HasNestedOrComma = True
+                Exit Function
+            ElseIf ch = "," And depth = 1 Then
+                HasNestedOrComma = True
+                Exit Function
+            ElseIf ch = ")" Then
+                depth = depth - 1
+                If depth = 0 Then
+                    HasNestedOrComma = False
+                    Exit Function
+                End If
+            End If
+        End If
+    Next i
+    HasNestedOrComma = False
+End Function
+
+Private Function GetColNameByIndex(ByVal ColIndex As Long) As String
+    Dim k As Variant
+    For Each k In mColIndexMap.Keys
+        If mColIndexMap.Item(k) = ColIndex Then
+            Dim ks As String
+            ks = CStr(k)
+            If Left$(ks, 1) <> "C" Or Not IsNumeric(Mid$(ks, 2)) Then
+                GetColNameByIndex = ks
+                Exit Function
+            End If
+        End If
+    Next k
+    GetColNameByIndex = "C" & CStr(ColIndex)
+End Function
+
 ' Evaluates an Excel formula expression in memory (optionally resolving column tokens [ColName] to ranges).
 ' Returns scalar value, 1D array, or 2D array computed by Excel calculation engine without modifying grid.
 Public Function Evaluate(ByVal Expression As String) As Variant
