@@ -254,6 +254,7 @@ Public Function SetColumnFormula(ByVal ColumnKey As Variant, _
     cleanTmpl = Trim$(FormulaTemplate)
     If Left$(cleanTmpl, 1) = "'" Then cleanTmpl = Trim$(Mid$(cleanTmpl, 2))
     If Left$(cleanTmpl, 1) <> "=" Then cleanTmpl = "=" & cleanTmpl
+    cleanTmpl = NormalizeFormulaSeparators(cleanTmpl)
 
     Dim detectR1C1 As Boolean
     detectR1C1 = IsR1C1 Or (InStr(1, cleanTmpl, "=RC", vbTextCompare) = 1) Or (InStr(1, cleanTmpl, "R[", vbTextCompare) > 0)
@@ -295,6 +296,35 @@ Public Function SetColumnFormulaBulk(ByVal ColumnKey As Variant, _
     Set SetColumnFormulaBulk = SetColumnFormula(ColumnKey, FormulaTemplate, _
                                                 UseAutoFill:=False, _
                                                 PreferFormula2:=PreferFormula2)
+End Function
+
+' Sets column formula using localized formula syntax (.FormulaLocal, e.g. German/French localized functions)
+Public Function SetColumnFormulaLocal(ByVal ColumnKey As Variant, ByVal FormulaLocalTemplate As String) As cFormulaEngine
+    CheckAttached "SetColumnFormulaLocal"
+    If mRowCount = 0 Then
+        Set SetColumnFormulaLocal = Me
+        Exit Function
+    End If
+
+    Dim cIdx As Long
+    cIdx = ResolveColIndex(ColumnKey)
+
+    Dim colDataRng As Object
+    Set colDataRng = mDataBodyRange.Columns(cIdx)
+
+    Dim firstDataRow As Long
+    firstDataRow = mDataBodyRange.Row
+
+    Dim cleanTmpl As String
+    cleanTmpl = Trim$(FormulaLocalTemplate)
+    If Left$(cleanTmpl, 1) = "'" Then cleanTmpl = Trim$(Mid$(cleanTmpl, 2))
+    If Left$(cleanTmpl, 1) <> "=" Then cleanTmpl = "=" & cleanTmpl
+
+    Dim parsedFormula As String
+    parsedFormula = ParseFormulaTemplate(cleanTmpl, cIdx, firstDataRow)
+
+    colDataRng.FormulaLocal = parsedFormula
+    Set SetColumnFormulaLocal = Me
 End Function
 
 ' Injects a modern Dynamic Array formula (spill range, e.g. =UNIQUE(), =FILTER(), =SORT()) into an anchor cell.
@@ -827,6 +857,299 @@ Public Function AuditFormulas() As cDataFrame
     Set AuditFormulas = auditDf
 End Function
 
+' Audits the worksheet for circular references using Excel's built-in circular calculation detection.
+' Returns a cDataFrame with details of any circular reference loops found.
+Public Function AuditCircularReferences() As cDataFrame
+    On Error GoTo CatchErr
+    Dim circDf As New cDataFrame
+    circDf.AddColumn "Address"
+    circDf.AddColumn "Row"
+    circDf.AddColumn "Column"
+    circDf.AddColumn "Formula"
+    circDf.AddColumn "Severity"
+    circDf.AddColumn "Suggestion"
+
+    If mDataBodyRange Is Nothing Then
+        Set AuditCircularReferences = circDf
+        Exit Function
+    End If
+
+    Dim ws As Worksheet
+    Set ws = mDataBodyRange.Worksheet
+    Dim circCell As Range
+    Set circCell = ws.CircularReference
+
+    If Not circCell Is Nothing Then
+        Dim fText As String
+        fText = circCell.Formula
+
+        circDf.AddRow circCell.Address(False, False), _
+                      circCell.Row, _
+                      circCell.Column, _
+                      fText, _
+                      "CRITICAL", _
+                      "Circular reference detected. Break circular loop by eliminating self/mutual reference."
+    End If
+
+    Set AuditCircularReferences = circDf
+    Exit Function
+
+CatchErr:
+    Set AuditCircularReferences = circDf
+End Function
+
+' Audits the attached range or worksheet for volatile functions (OFFSET, INDIRECT, TODAY, NOW, RAND, etc.).
+' Volatile functions recalculate on every worksheet change, severely degrading performance in large models.
+Public Function AuditVolatileFormulas(Optional ScopeRange As Variant) As cDataFrame
+    On Error GoTo CatchErr
+    Dim volDf As New cDataFrame
+    volDf.AddColumn "Address"
+    volDf.AddColumn "Column"
+    volDf.AddColumn "Formula"
+    volDf.AddColumn "VolatileFunction"
+    volDf.AddColumn "Severity"
+    volDf.AddColumn "Suggestion"
+
+    If mDataBodyRange Is Nothing Then
+        Set AuditVolatileFormulas = volDf
+        Exit Function
+    End If
+
+    Dim targetRng As Range
+    If IsMissing(ScopeRange) Then
+        Set targetRng = mDataBodyRange
+    ElseIf IsEmpty(ScopeRange) Then
+        Set targetRng = mDataBodyRange
+    ElseIf IsObject(ScopeRange) Then
+        If TypeOf ScopeRange Is Range Then
+            Set targetRng = ScopeRange
+        End If
+    Else
+        Dim cIdx As Long
+        cIdx = ResolveColIndex(ScopeRange)
+        If cIdx > 0 And cIdx <= mColumnCount Then
+            Set targetRng = mDataBodyRange.Columns(cIdx)
+        Else
+            Set targetRng = mDataBodyRange
+        End If
+    End If
+
+    If targetRng Is Nothing Then
+        Set AuditVolatileFormulas = volDf
+        Exit Function
+    End If
+
+    Dim cellObj As Range
+    Dim fText As String, uText As String
+    Dim volName As String, sugg As String, sev As String
+
+    For Each cellObj In targetRng.Cells
+        fText = ""
+        If cellObj.HasFormula Then
+            fText = cellObj.Formula
+        End If
+
+        If Len(fText) > 0 Then
+            uText = UCase$(fText)
+            volName = ""
+            sugg = ""
+            sev = "WARNING"
+
+            If InStr(1, uText, "OFFSET(") > 0 Then
+                volName = "OFFSET"
+                sugg = "Replace OFFSET with non-volatile INDEX(:INDEX) range pattern."
+            ElseIf InStr(1, uText, "INDIRECT(") > 0 Then
+                volName = "INDIRECT"
+                sugg = "Replace INDIRECT with structured table references or CHOOSE."
+            ElseIf InStr(1, uText, "TODAY(") > 0 Then
+                volName = "TODAY"
+                sugg = "Store date in a single parameter cell or freeze to static values."
+                sev = "INFO"
+            ElseIf InStr(1, uText, "NOW(") > 0 Then
+                volName = "NOW"
+                sugg = "Store timestamp in a single parameter cell or freeze to static values."
+                sev = "INFO"
+            ElseIf InStr(1, uText, "RAND(") > 0 Or InStr(1, uText, "RANDBETWEEN(") > 0 Or InStr(1, uText, "RANDARRAY(") > 0 Then
+                volName = "RAND"
+                sugg = "Freeze random values using FreezeToValues to avoid constant recalculations."
+            ElseIf InStr(1, uText, "INFO(") > 0 Then
+                volName = "INFO"
+                sugg = "Query environment info once via VBA instead of repeating volatile cell formulas."
+                sev = "INFO"
+            End If
+
+            If Len(volName) > 0 Then
+                Dim colLtr As String
+                colLtr = ColIndexToLetter(cellObj.Column)
+                volDf.AddRow cellObj.Address(False, False), colLtr, fText, volName, sev, sugg
+            End If
+        End If
+    Next cellObj
+
+    Set AuditVolatileFormulas = volDf
+    Exit Function
+
+CatchErr:
+    Set AuditVolatileFormulas = volDf
+End Function
+
+' Audits external workbook links (LinkSources) in the parent workbook.
+' Detects broken links, missing files, and orphaned remote references.
+Public Function AuditExternalLinks() As cDataFrame
+    On Error GoTo CatchErr
+    Dim extDf As New cDataFrame
+    extDf.AddColumn "LinkIndex"
+    extDf.AddColumn "SourcePath"
+    extDf.AddColumn "FileName"
+    extDf.AddColumn "Status"
+    extDf.AddColumn "Severity"
+    extDf.AddColumn "Suggestion"
+
+    If mDataBodyRange Is Nothing Then
+        Set AuditExternalLinks = extDf
+        Exit Function
+    End If
+
+    Dim wb As Workbook
+    Set wb = mDataBodyRange.Worksheet.Parent
+    Dim links As Variant
+    links = wb.LinkSources(1) ' 1 = xlExcelLinks
+
+    If IsEmpty(links) Or IsNull(links) Then
+        Set AuditExternalLinks = extDf
+        Exit Function
+    End If
+
+    Dim i As Long
+    Dim pth As String, fName As String, stat As String, sev As String, sugg As String
+    For i = LBound(links) To UBound(links)
+        pth = CStr(links(i))
+        fName = Mid$(pth, InStrRev(pth, "\") + 1)
+        stat = "OK"
+        sev = "INFO"
+        sugg = "External link active and accessible."
+
+        If Left$(pth, 2) = "\\" Or Mid$(pth, 2, 2) = ":\" Then
+            Dim fExist As String
+            fExist = ""
+            On Error Resume Next
+            fExist = Dir$(pth)
+            On Error GoTo CatchErr
+            If Len(fExist) = 0 Then
+                stat = "BROKEN"
+                sev = "HIGH"
+                sugg = "File not found at specified local/network path. Use RepairExternalLink or BreakExternalLinks."
+            End If
+        End If
+
+        extDf.AddRow i, pth, fName, stat, sev, sugg
+    Next i
+
+    Set AuditExternalLinks = extDf
+    Exit Function
+
+CatchErr:
+    Set AuditExternalLinks = extDf
+End Function
+
+Public Function RepairExternalLink(ByVal OldPath As String, ByVal NewPath As String) As Boolean
+    If mDataBodyRange Is Nothing Then Exit Function
+    On Error Resume Next
+    Dim wb As Object
+    Set wb = mDataBodyRange.Worksheet.Parent
+    wb.ChangeLink OldPath, NewPath, 1 ' 1 = xlExcelLinks
+    RepairExternalLink = (Err.Number = 0)
+    On Error GoTo 0
+End Function
+
+' Converts external linked formulas to their current static values, severing remote workbook dependencies.
+Public Function BreakExternalLinks(Optional ByVal SpecificPath As String = "") As Long
+    If mDataBodyRange Is Nothing Then Exit Function
+    Dim wb As Object
+    Set wb = mDataBodyRange.Worksheet.Parent
+
+    Dim links As Variant
+    On Error Resume Next
+    links = wb.LinkSources(1)
+    On Error GoTo 0
+
+    If IsEmpty(links) Or IsNull(links) Then Exit Function
+
+    Dim i As Long, brokenCount As Long
+    brokenCount = 0
+
+    For i = LBound(links) To UBound(links)
+        Dim pth As String
+        pth = CStr(links(i))
+        If Len(SpecificPath) = 0 Or StrComp(pth, SpecificPath, vbTextCompare) = 0 Then
+            On Error Resume Next
+            wb.BreakLink pth, 1 ' 1 = xlExcelLinks
+            If Err.Number = 0 Then brokenCount = brokenCount + 1
+            On Error GoTo 0
+        End If
+    Next i
+
+    BreakExternalLinks = brokenCount
+End Function
+
+' Quotes a string for use in Excel formulas or VBA strings without double-quote madness
+' e.g. Quote("Pending") -> """Pending"""
+Public Function Quote(ByVal Text As String) As String
+    Quote = Chr$(34) & Replace(Text, Chr$(34), Chr$(34) & Chr$(34)) & Chr$(34)
+End Function
+
+' Formats an operator and value into standard Excel criteria format for COUNTIF, SUMIF, etc.
+' e.g. FormatCriteria(">", 50) -> ">50"
+' e.g. FormatCriteria("<>", 0) -> "<>0"
+' e.g. FormatCriteria("=", "Active") -> "=Active"
+Public Function FormatCriteria(ByVal OperatorStr As String, ByVal Value As Variant) As String
+    Dim op As String
+    op = Trim$(OperatorStr)
+    If Len(op) = 0 Then op = "="
+
+    If IsDate(Value) Then
+        FormatCriteria = op & Format$(Value, "yyyy-mm-dd")
+    Else
+        FormatCriteria = op & CStr(Value)
+    End If
+End Function
+
+' Bridges regional formula separator differences (; vs ,)
+' Replaces semicolons outside of quotes with commas for English Excel engine (.Formula)
+Public Function NormalizeFormulaSeparators(ByVal FormulaStr As String) As String
+    If InStr(1, FormulaStr, ";") = 0 Then
+        NormalizeFormulaSeparators = FormulaStr
+        Exit Function
+    End If
+
+    Dim i As Long, n As Long
+    n = Len(FormulaStr)
+    Dim ch As String
+    Dim inDoubleQuotes As Boolean
+    Dim inSingleQuotes As Boolean
+    inDoubleQuotes = False
+    inSingleQuotes = False
+    Dim result As String
+    result = ""
+
+    For i = 1 To n
+        ch = Mid$(FormulaStr, i, 1)
+        If ch = Chr$(34) And Not inSingleQuotes Then
+            inDoubleQuotes = Not inDoubleQuotes
+            result = result & ch
+        ElseIf ch = "'" And Not inDoubleQuotes Then
+            inSingleQuotes = Not inSingleQuotes
+            result = result & ch
+        ElseIf ch = ";" And Not inDoubleQuotes And Not inSingleQuotes Then
+            result = result & ","
+        Else
+            result = result & ch
+        End If
+    Next i
+
+    NormalizeFormulaSeparators = result
+End Function
+
 ' Traces column and cell precedents for a formula cell.
 ' Returns an array of referenced column names (e.g. Array("Qty", "Price")).
 Public Function GetPrecedents(ByVal ColumnKey As Variant, Optional ByVal RowIndex As Long = 1) As Variant
@@ -1152,7 +1475,7 @@ Public Function ParseFormulaTemplate(ByVal Template As String, _
                                      ByVal TargetColIdx As Long, _
                                      ByVal CurrentRow As Long) As String
     Dim result As String
-    result = Template
+    result = TranslateSingleQuoteLiterals(Template)
 
     Dim firstRow As Long, lastRow As Long
     firstRow = mDataBodyRange.Row
@@ -1201,6 +1524,64 @@ Public Function ParseFormulaTemplate(ByVal Template As String, _
     Next colKey
 
     ParseFormulaTemplate = result
+End Function
+
+Private Function TranslateSingleQuoteLiterals(ByVal Template As String) As String
+    If InStr(1, Template, "'") = 0 Then
+        TranslateSingleQuoteLiterals = Template
+        Exit Function
+    End If
+
+    Dim n As Long
+    n = Len(Template)
+    Dim result As String
+    result = ""
+    Dim i As Long
+    i = 1
+
+    Do While i <= n
+        Dim ch As String
+        ch = Mid$(Template, i, 1)
+        If ch = "'" Then
+            Dim closePos As Long
+            closePos = InStr(i + 1, Template, "'")
+            If closePos > 0 Then
+                Dim nextIdx As Long
+                nextIdx = closePos + 1
+                Do While nextIdx <= n
+                    If Mid$(Template, nextIdx, 1) <> " " Then Exit Do
+                    nextIdx = nextIdx + 1
+                Loop
+
+                Dim isSheetRef As Boolean
+                isSheetRef = False
+                If nextIdx <= n Then
+                    If Mid$(Template, nextIdx, 1) = "!" Then
+                        isSheetRef = True
+                    End If
+                End If
+
+                If isSheetRef Then
+                    result = result & Mid$(Template, i, closePos - i + 1)
+                    i = closePos + 1
+                Else
+                    Dim literalText As String
+                    literalText = Mid$(Template, i + 1, closePos - i - 1)
+                    literalText = Replace(literalText, Chr$(34), Chr$(34) & Chr$(34))
+                    result = result & Chr$(34) & literalText & Chr$(34)
+                    i = closePos + 1
+                End If
+            Else
+                result = result & ch
+                i = i + 1
+            End If
+        Else
+            result = result & ch
+            i = i + 1
+        End If
+    Loop
+
+    TranslateSingleQuoteLiterals = result
 End Function
 
 Public Function ColIndexToLetter(ByVal ColIndex As Long) As String
