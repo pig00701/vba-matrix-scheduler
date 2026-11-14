@@ -1990,3 +1990,185 @@ Private Function ResolveColIndices(ByVal ColumnKeyOrPattern As Variant) As Long(
     End If
     ResolveColIndices = result
 End Function
+
+' ------------------------------------------------------------------------------
+' Table Conversion, Validation Highlighting, Presets & Extended Conditional Formatting
+' ------------------------------------------------------------------------------
+
+' Converts the attached styled range into an official Excel ListObject table.
+Public Function ConvertToTable(Optional ByVal TableName As String = "", _
+                               Optional ByVal TableStyle As String = "TableStyleMedium2") As Object
+    CheckAttached "ConvertToTable"
+    If Not mListObject Is Nothing Then
+        Set ConvertToTable = mListObject
+        Exit Function
+    End If
+
+    Dim hasHdr As Long
+    hasHdr = IIf(mHasHeaders, 1, 2) ' 1=xlYes, 2=xlNo
+    Dim lo As Object
+    Set lo = mWorksheet.ListObjects.Add(1, mTableRange, , hasHdr) ' 1=xlSrcRange
+    If Len(Trim$(TableName)) > 0 Then
+        On Error Resume Next
+        lo.Name = Trim$(TableName)
+        On Error GoTo 0
+    End If
+    If Len(Trim$(TableStyle)) > 0 Then
+        On Error Resume Next
+        lo.TableStyle = Trim$(TableStyle)
+        On Error GoTo 0
+    End If
+
+    Set mListObject = lo
+    Set ConvertToTable = lo
+End Function
+
+' Highlights cells in DataBodyRange corresponding to validation errors in Validator.Errors.
+Public Function HighlightValidationErrors(ByVal Validator As cDataValidator, _
+                                          Optional ByVal FillColor As Long = 13551615, _
+                                          Optional ByVal AddComments As Boolean = True) As cTableStyler
+    CheckAttached "HighlightValidationErrors"
+    If Validator Is Nothing Or mDataBodyRange Is Nothing Then
+        Set HighlightValidationErrors = Me
+        Exit Function
+    End If
+
+    Dim errDf As cDataFrame
+    Set errDf = Validator.Errors
+    If errDf.RowCount = 0 Then
+        Set HighlightValidationErrors = Me
+        Exit Function
+    End If
+
+    Dim r As Long, rowIdx As Long, colName As String, msg As String, colIdx As Long
+    Dim targetCell As Object
+    For r = 1 To errDf.RowCount
+        If IsNumeric(errDf(r, "RowIndex")) Then
+            rowIdx = CLng(errDf(r, "RowIndex"))
+            colName = CStr(errDf(r, "ColumnName"))
+            msg = CStr(errDf(r, "ErrorMessage"))
+            If rowIdx >= 1 And rowIdx <= mRowCount Then
+                On Error Resume Next
+                colIdx = ResolveColIndex(colName)
+                If Err.Number = 0 And colIdx >= 1 And colIdx <= mColumnCount Then
+                    Set targetCell = mDataBodyRange.Cells(rowIdx, colIdx)
+                    targetCell.Interior.Color = FillColor
+                    If AddComments Then
+                        targetCell.ClearComments
+                        targetCell.AddComment msg
+                    End If
+                End If
+                Err.Clear
+                On Error GoTo 0
+            End If
+        End If
+    Next r
+
+    Set HighlightValidationErrors = Me
+End Function
+
+' Semantic formatting presets
+Public Function FormatAsCurrency(ByVal ColumnKeyOrPattern As Variant, _
+                                 Optional ByVal Symbol As String = "$", _
+                                 Optional ByVal Decimals As Long = 2) As cTableStyler
+    Dim decPart As String
+    If Decimals > 0 Then decPart = "." & String$(Decimals, "0") Else decPart = ""
+    Me.FormatColumn ColumnKeyOrPattern, Symbol & "#,##0" & decPart
+    Set FormatAsCurrency = Me
+End Function
+
+Public Function FormatAsPercent(ByVal ColumnKeyOrPattern As Variant, _
+                                Optional ByVal Decimals As Long = 1) As cTableStyler
+    Dim decPart As String
+    If Decimals > 0 Then decPart = "." & String$(Decimals, "0") Else decPart = ""
+    Me.FormatColumn ColumnKeyOrPattern, "0" & decPart & "%"
+    Set FormatAsPercent = Me
+End Function
+
+Public Function FormatAsDate(ByVal ColumnKeyOrPattern As Variant, _
+                             Optional ByVal DateFormat As String = "yyyy-mm-dd") As cTableStyler
+    Me.FormatColumn ColumnKeyOrPattern, DateFormat
+    Set FormatAsDate = Me
+End Function
+
+Public Function ClearFormats() As cTableStyler
+    CheckAttached "ClearFormats"
+    mTableRange.ClearFormats
+    Set ClearFormats = Me
+End Function
+
+' Highlights duplicate values within target columns using Excel UniqueValues FormatCondition.
+Public Function HighlightDuplicates(ByVal ColumnKeyOrPattern As Variant, _
+                                    Optional ByVal FillColor As Long = 13551615, _
+                                    Optional ByVal FontColor As Long = 1875718) As cTableStyler
+    CheckAttached "HighlightDuplicates"
+    If mDataBodyRange Is Nothing Then
+        Set HighlightDuplicates = Me
+        Exit Function
+    End If
+
+    Dim indices() As Long
+    indices = ResolveColIndices(ColumnKeyOrPattern)
+    Dim i As Long, rng As Object, uv As Object, fmlaStr As String
+    For i = LBound(indices) To UBound(indices)
+        Set rng = mDataBodyRange.Columns(indices(i))
+        fmlaStr = "=COUNTIF(" & rng.Address(True, True) & "," & rng.Cells(1, 1).Address(False, False) & ")>1"
+        On Error Resume Next
+        Set uv = rng.FormatConditions.Add(Type:=2, Formula1:=fmlaStr) ' 2=xlExpression
+        If Not uv Is Nothing Then
+            uv.Interior.Color = FillColor
+            If FontColor >= 0 Then uv.Font.Color = FontColor
+        End If
+        On Error GoTo 0
+    Next i
+    Set HighlightDuplicates = Me
+End Function
+
+' Highlights blank/empty cells within target columns.
+Public Function HighlightBlanks(ByVal ColumnKeyOrPattern As Variant, _
+                                Optional ByVal FillColor As Long = 10284031) As cTableStyler
+    CheckAttached "HighlightBlanks"
+    If mDataBodyRange Is Nothing Then
+        Set HighlightBlanks = Me
+        Exit Function
+    End If
+
+    Dim indices() As Long
+    indices = ResolveColIndices(ColumnKeyOrPattern)
+    Dim i As Long, rng As Object, fc As Object, firstAddr As String
+    For i = LBound(indices) To UBound(indices)
+        Set rng = mDataBodyRange.Columns(indices(i))
+        firstAddr = rng.Cells(1, 1).Address(False, False)
+        On Error Resume Next
+        Set fc = rng.FormatConditions.Add(Type:=2, Formula1:="=ISBLANK(" & firstAddr & ")") ' 2=xlExpression
+        If Not fc Is Nothing Then
+            fc.Interior.Color = FillColor
+        End If
+        On Error GoTo 0
+    Next i
+    Set HighlightBlanks = Me
+End Function
+
+' Applies Excel Icon Sets (e.g. 4=xl3TrafficLights1, 1=xl3Arrows).
+Public Function ApplyIconSets(ByVal ColumnKeyOrPattern As Variant, _
+                              Optional ByVal IconSetId As Long = 4) As cTableStyler
+    CheckAttached "ApplyIconSets"
+    If mDataBodyRange Is Nothing Then
+        Set ApplyIconSets = Me
+        Exit Function
+    End If
+
+    Dim indices() As Long
+    indices = ResolveColIndices(ColumnKeyOrPattern)
+    Dim i As Long, rng As Object, iconCond As Object
+    For i = LBound(indices) To UBound(indices)
+        Set rng = mDataBodyRange.Columns(indices(i))
+        On Error Resume Next
+        Set iconCond = rng.FormatConditions.AddIconSetCondition
+        If Not iconCond Is Nothing Then
+            iconCond.IconSet = mWorksheet.Application.IconSets(IconSetId)
+        End If
+        On Error GoTo 0
+    Next i
+    Set ApplyIconSets = Me
+End Function

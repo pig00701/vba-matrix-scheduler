@@ -832,29 +832,33 @@ Public Function RollingSum(ByVal WindowSize As Long, Optional ByVal ResultName A
     End If
 
     res.EnsureCapacity mCount
-    Dim i As Long, startIdx As Long, j As Long
-    Dim currentSum As Double
-    Dim v As Variant, hasValid As Boolean
+    Dim i As Long
+    Dim currentSum As Double, validCnt As Long
+    Dim vIn As Variant, vOut As Variant
+    currentSum = 0#
+    validCnt = 0
 
     For i = 1 To mCount
+        vIn = mData(i)
+        If IsNumeric(vIn) And Not IsEmpty(vIn) And Not IsNull(vIn) And Not IsError(vIn) Then
+            currentSum = currentSum + CDbl(vIn)
+            validCnt = validCnt + 1
+        End If
+
+        If i > WindowSize Then
+            vOut = mData(i - WindowSize)
+            If IsNumeric(vOut) And Not IsEmpty(vOut) And Not IsNull(vOut) And Not IsError(vOut) Then
+                currentSum = currentSum - CDbl(vOut)
+                validCnt = validCnt - 1
+            End If
+        End If
+
         If i < WindowSize Then
             res.Append CVErr(2042)
+        ElseIf validCnt > 0 Then
+            res.Append currentSum
         Else
-            currentSum = 0#
-            hasValid = False
-            startIdx = i - WindowSize + 1
-            For j = startIdx To i
-                v = mData(j)
-                If IsNumeric(v) And Not IsEmpty(v) And Not IsNull(v) And Not IsError(v) Then
-                    currentSum = currentSum + CDbl(v)
-                    hasValid = True
-                End If
-            Next j
-            If hasValid Then
-                res.Append currentSum
-            Else
-                res.Append CVErr(2042)
-            End If
+            res.Append CVErr(2042)
         End If
     Next i
 
@@ -880,29 +884,33 @@ Public Function RollingAvg(ByVal WindowSize As Long, Optional ByVal ResultName A
     End If
 
     res.EnsureCapacity mCount
-    Dim i As Long, startIdx As Long, j As Long
+    Dim i As Long
     Dim currentSum As Double, numValid As Long
-    Dim v As Variant
+    Dim vIn As Variant, vOut As Variant
+    currentSum = 0#
+    numValid = 0
 
     For i = 1 To mCount
+        vIn = mData(i)
+        If IsNumeric(vIn) And Not IsEmpty(vIn) And Not IsNull(vIn) And Not IsError(vIn) Then
+            currentSum = currentSum + CDbl(vIn)
+            numValid = numValid + 1
+        End If
+
+        If i > WindowSize Then
+            vOut = mData(i - WindowSize)
+            If IsNumeric(vOut) And Not IsEmpty(vOut) And Not IsNull(vOut) And Not IsError(vOut) Then
+                currentSum = currentSum - CDbl(vOut)
+                numValid = numValid - 1
+            End If
+        End If
+
         If i < WindowSize Then
             res.Append CVErr(2042)
+        ElseIf numValid > 0 Then
+            res.Append currentSum / numValid
         Else
-            currentSum = 0#
-            numValid = 0
-            startIdx = i - WindowSize + 1
-            For j = startIdx To i
-                v = mData(j)
-                If IsNumeric(v) And Not IsEmpty(v) And Not IsNull(v) And Not IsError(v) Then
-                    currentSum = currentSum + CDbl(v)
-                    numValid = numValid + 1
-                End If
-            Next j
-            If numValid > 0 Then
-                res.Append currentSum / numValid
-            Else
-                res.Append CVErr(2042)
-            End If
+            res.Append CVErr(2042)
         End If
     Next i
 
@@ -2002,6 +2010,249 @@ Public Function FormatDate(ByVal FormatString As String, _
     Next i
 
     Set FormatDate = res
+End Function
+
+' ------------------------------------------------------------------------------
+' Frequency, Boolean Masks, Directional Fill, Math & String Helpers
+' ------------------------------------------------------------------------------
+
+' Returns the count of distinct non-empty values in O(N).
+Public Function NUnique() As Long
+    If mCount = 0 Then Exit Function
+    Dim dict As Object
+    Set dict = CreateObject("Scripting.Dictionary")
+    Dim i As Long, k As String
+    For i = 1 To mCount
+        If Not IsEmpty(mData(i)) And Not IsNull(mData(i)) And Not IsError(mData(i)) Then
+            k = CStr(mData(i))
+            If Len(k) > 0 Then
+                If Not dict.Exists(k) Then dict.Add k, 1
+            End If
+        End If
+    Next i
+    NUnique = dict.Count
+End Function
+
+' Returns a cDataFrame with columns ["Value", "Count"] sorted by descending frequency.
+Public Function ValueCounts() As cDataFrame
+    Dim df As New cDataFrame
+    df.AddColumn "Value"
+    df.AddColumn "Count"
+    If mCount = 0 Then
+        Set ValueCounts = df
+        Exit Function
+    End If
+
+    Dim cntDict As Object, valDict As Object
+    Set cntDict = CreateObject("Scripting.Dictionary")
+    Set valDict = CreateObject("Scripting.Dictionary")
+    Dim i As Long, k As String
+    For i = 1 To mCount
+        If Not IsEmpty(mData(i)) And Not IsNull(mData(i)) And Not IsError(mData(i)) Then
+            k = CStr(mData(i))
+            If cntDict.Exists(k) Then
+                cntDict.Item(k) = cntDict.Item(k) + 1
+            Else
+                cntDict.Add k, 1
+                valDict.Add k, mData(i)
+            End If
+        End If
+    Next i
+
+    Dim key As Variant
+    For Each key In cntDict.Keys
+        df.AddRow valDict.Item(key), cntDict.Item(key)
+    Next key
+    If df.RowCount > 1 Then df.Sort "Count", False
+    Set ValueCounts = df
+End Function
+
+' Forward-fills empty/null values with the last valid preceding value (returns new cColumn).
+Public Function FFill(Optional ByVal TreatBlankStringAsNA As Boolean = False, _
+                      Optional ByVal ResultName As String = "") As cColumn
+    Dim res As cColumn
+    Set res = Me.Clone()
+    If Len(Trim$(ResultName)) > 0 Then res.Name = Trim$(ResultName)
+    If mCount = 0 Then
+        Set FFill = res
+        Exit Function
+    End If
+
+    Dim hasLast As Boolean, lastVal As Variant, i As Long, v As Variant, isMissingVal As Boolean
+    hasLast = False
+    For i = 1 To mCount
+        v = mData(i)
+        isMissingVal = IsEmpty(v) Or IsNull(v)
+        If Not isMissingVal And TreatBlankStringAsNA Then
+            If VarType(v) = vbString Then
+                If Len(Trim$(CStr(v))) = 0 Then isMissingVal = True
+            End If
+        End If
+
+        If isMissingVal Then
+            If hasLast Then res.Item(i) = lastVal
+        Else
+            lastVal = v
+            hasLast = True
+        End If
+    Next i
+
+    Set FFill = res
+End Function
+
+' Backward-fills empty/null values with the next valid value (returns new cColumn).
+Public Function BFill(Optional ByVal TreatBlankStringAsNA As Boolean = False, _
+                      Optional ByVal ResultName As String = "") As cColumn
+    Dim res As cColumn
+    Set res = Me.Clone()
+    If Len(Trim$(ResultName)) > 0 Then res.Name = Trim$(ResultName)
+    If mCount = 0 Then
+        Set BFill = res
+        Exit Function
+    End If
+
+    Dim hasNext As Boolean, nextVal As Variant, i As Long, v As Variant, isMissingVal As Boolean
+    hasNext = False
+    For i = mCount To 1 Step -1
+        v = mData(i)
+        isMissingVal = IsEmpty(v) Or IsNull(v)
+        If Not isMissingVal And TreatBlankStringAsNA Then
+            If VarType(v) = vbString Then
+                If Len(Trim$(CStr(v))) = 0 Then isMissingVal = True
+            End If
+        End If
+
+        If isMissingVal Then
+            If hasNext Then res.Item(i) = nextVal
+        Else
+            nextVal = v
+            hasNext = True
+        End If
+    Next i
+
+    Set BFill = res
+End Function
+
+' Returns a Boolean cColumn (True where Empty/Null/Error).
+Public Function IsNA(Optional ByVal ResultName As String = "") As cColumn
+    Dim res As New cColumn
+    res.Name = IIf(Len(Trim$(ResultName)) > 0, Trim$(ResultName), mName & "_IsNA")
+    res.EnsureCapacity mCount
+    res.SetCount mCount
+
+    Dim i As Long, v As Variant
+    For i = 1 To mCount
+        v = mData(i)
+        res.Item(i) = (IsEmpty(v) Or IsNull(v) Or IsError(v))
+    Next i
+    Set IsNA = res
+End Function
+
+' Returns a Boolean cColumn (True where value exists in AllowedArray).
+Public Function IsIn(ByVal AllowedArray As Variant, Optional ByVal ResultName As String = "") As cColumn
+    Dim res As New cColumn
+    res.Name = IIf(Len(Trim$(ResultName)) > 0, Trim$(ResultName), mName & "_IsIn")
+    res.EnsureCapacity mCount
+    res.SetCount mCount
+
+    Dim dict As Object
+    Set dict = CreateObject("Scripting.Dictionary")
+    dict.CompareMode = 1 ' TextCompare
+    Dim elem As Variant
+    If IsArray(AllowedArray) Then
+        For Each elem In AllowedArray
+            dict(CStr(elem)) = True
+        Next elem
+    Else
+        dict(CStr(AllowedArray)) = True
+    End If
+
+    Dim i As Long, v As Variant
+    For i = 1 To mCount
+        v = mData(i)
+        If IsEmpty(v) Or IsNull(v) Or IsError(v) Then
+            res.Item(i) = False
+        Else
+            res.Item(i) = dict.Exists(CStr(v))
+        End If
+    Next i
+    Set IsIn = res
+End Function
+
+' Vectorized Abs for numeric elements.
+Public Function AbsCol(Optional ByVal ResultName As String = "") As cColumn
+    Dim res As New cColumn
+    res.Name = IIf(Len(Trim$(ResultName)) > 0, Trim$(ResultName), mName)
+    res.EnsureCapacity mCount
+    res.SetCount mCount
+    Dim i As Long, v As Variant
+    For i = 1 To mCount
+        v = mData(i)
+        If IsNumeric(v) And Not IsEmpty(v) And Not IsNull(v) And Not IsError(v) Then
+            res.Item(i) = VBA.Abs(CDbl(v))
+        Else
+            res.Item(i) = v
+        End If
+    Next i
+    Set AbsCol = res
+End Function
+
+' Vectorized Round for numeric elements.
+Public Function RoundCol(Optional ByVal Decimals As Long = 0, Optional ByVal ResultName As String = "") As cColumn
+    Dim res As New cColumn
+    res.Name = IIf(Len(Trim$(ResultName)) > 0, Trim$(ResultName), mName)
+    res.EnsureCapacity mCount
+    res.SetCount mCount
+    Dim i As Long, v As Variant
+    For i = 1 To mCount
+        v = mData(i)
+        If IsNumeric(v) And Not IsEmpty(v) And Not IsNull(v) And Not IsError(v) Then
+            res.Item(i) = VBA.Round(CDbl(v), Decimals)
+        Else
+            res.Item(i) = v
+        End If
+    Next i
+    Set RoundCol = res
+End Function
+
+' Returns a Boolean cColumn (True where text contains Substr).
+Public Function StrContains(ByVal Substr As String, _
+                            Optional ByVal IgnoreCase As Boolean = True, _
+                            Optional ByVal ResultName As String = "") As cColumn
+    Dim res As New cColumn
+    res.Name = IIf(Len(Trim$(ResultName)) > 0, Trim$(ResultName), mName & "_Contains")
+    res.EnsureCapacity mCount
+    res.SetCount mCount
+    Dim cmpMode As VbCompareMethod
+    cmpMode = IIf(IgnoreCase, vbTextCompare, vbBinaryCompare)
+    Dim i As Long, v As Variant
+    For i = 1 To mCount
+        v = mData(i)
+        If IsEmpty(v) Or IsNull(v) Or IsError(v) Then
+            res.Item(i) = False
+        Else
+            res.Item(i) = (InStr(1, CStr(v), Substr, cmpMode) > 0)
+        End If
+    Next i
+    Set StrContains = res
+End Function
+
+' Returns a Long cColumn with string lengths.
+Public Function StrLen(Optional ByVal ResultName As String = "") As cColumn
+    Dim res As New cColumn
+    res.Name = IIf(Len(Trim$(ResultName)) > 0, Trim$(ResultName), mName & "_Len")
+    res.EnsureCapacity mCount
+    res.SetCount mCount
+    Dim i As Long, v As Variant
+    For i = 1 To mCount
+        v = mData(i)
+        If IsEmpty(v) Or IsNull(v) Or IsError(v) Then
+            res.Item(i) = 0&
+        Else
+            res.Item(i) = Len(CStr(v))
+        End If
+    Next i
+    Set StrLen = res
 End Function
 
 ' ------------------------------------------------------------------------------

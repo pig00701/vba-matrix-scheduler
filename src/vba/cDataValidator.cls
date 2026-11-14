@@ -23,16 +23,19 @@ Private mErrorsDf As cDataFrame     ' Stores validation error records
 Private mTotalRowsChecked As Long
 Private mFailedRowsCount As Long
 Private mIsValid As Boolean
+Private mCrossRules As Collection
 
 Private Sub Class_Initialize()
     Set mRules = CreateObject("Scripting.Dictionary")
     mRules.CompareMode = 1 ' Case-insensitive column matching
+    Set mCrossRules = New Collection
     ResetState
 End Sub
 
 Private Sub Class_Terminate()
     Set mRules = Nothing
     Set mErrorsDf = Nothing
+    Set mCrossRules = Nothing
 End Sub
 
 Private Sub ResetState()
@@ -131,6 +134,116 @@ End Function
 ' ------------------------------------------------------------------------------
 ' Validation Execution Engine
 ' ------------------------------------------------------------------------------
+
+' Adds a true RegExp pattern check (via VBScript.RegExp) to ColumnName.
+Public Function AddRegex(ByVal ColumnName As String, _
+                         ByVal Pattern As String, _
+                         Optional ByVal IgnoreCase As Boolean = False) As cDataValidator
+    Dim cleanCol As String
+    cleanCol = Trim$(ColumnName)
+    If Not mRules.Exists(cleanCol) Then
+        AddRule cleanCol
+    End If
+    Dim r As Object
+    Set r = mRules.Item(cleanCol)
+    r.Item("RegexPattern") = Pattern
+    r.Item("RegexIgnoreCase") = IgnoreCase
+    Set AddRegex = Me
+End Function
+
+' Adds string length bounds (MinLen / MaxLen; pass -1 for unbounded).
+Public Function AddStringLength(ByVal ColumnName As String, _
+                                Optional ByVal MinLen As Long = 0, _
+                                Optional ByVal MaxLen As Long = -1) As cDataValidator
+    Dim cleanCol As String
+    cleanCol = Trim$(ColumnName)
+    If Not mRules.Exists(cleanCol) Then
+        AddRule cleanCol
+    End If
+    Dim r As Object
+    Set r = mRules.Item(cleanCol)
+    r.Item("MinLen") = MinLen
+    r.Item("MaxLen") = MaxLen
+    Set AddStringLength = Me
+End Function
+
+' Adds a Date type + date range check.
+Public Function AddDateRange(ByVal ColumnName As String, _
+                             Optional ByVal MinDate As Variant, _
+                             Optional ByVal MaxDate As Variant) As cDataValidator
+    AddRule ColumnName, ExpectedType:=vbDate, MinVal:=MinDate, MaxVal:=MaxDate
+    Set AddDateRange = Me
+End Function
+
+' Adds a cross-column relational rule (e.g. "EndDate", ">=", "StartDate").
+Public Function AddCrossColumnRule(ByVal LeftCol As String, _
+                                   ByVal Operator As String, _
+                                   ByVal RightCol As String, _
+                                   Optional ByVal Description As String = "") As cDataValidator
+    Dim cr As Object
+    Set cr = CreateObject("Scripting.Dictionary")
+    cr.Add "LeftCol", Trim$(LeftCol)
+    cr.Add "Operator", Trim$(Operator)
+    cr.Add "RightCol", Trim$(RightCol)
+    cr.Add "Description", Trim$(Description)
+    mCrossRules.Add cr
+    Set AddCrossColumnRule = Me
+End Function
+
+' Exports list and numeric range rules to native Excel Data Validation on TargetRange.
+Public Function ApplyToExcelRange(ByVal TargetRange As Object, _
+                                  Optional ByVal HasHeaders As Boolean = True) As cDataValidator
+    If TargetRange Is Nothing Then
+        Set ApplyToExcelRange = Me
+        Exit Function
+    End If
+
+    Dim dataRng As Object, hdrRng As Object
+    If HasHeaders Then
+        If TargetRange.Rows.Count < 2 Then
+            Set ApplyToExcelRange = Me
+            Exit Function
+        End If
+        Set hdrRng = TargetRange.Rows(1)
+        Set dataRng = TargetRange.Offset(1, 0).Resize(TargetRange.Rows.Count - 1, TargetRange.Columns.Count)
+    Else
+        Set dataRng = TargetRange
+    End If
+
+    Dim c As Long, colHeader As String, rule As Object, colRng As Object
+    For c = 1 To dataRng.Columns.Count
+        If HasHeaders Then
+            colHeader = Trim$(CStr(hdrRng.Cells(1, c).Value))
+        Else
+            colHeader = "C" & CStr(c)
+        End If
+        If mRules.Exists(colHeader) Then
+            Set rule = mRules.Item(colHeader)
+            Set colRng = dataRng.Columns(c)
+            If rule.Exists("AllowedDict") Then
+                Dim allowedKeys As Variant, listStr As String
+                allowedKeys = rule.Item("AllowedDict").Keys
+                listStr = Join(allowedKeys, ",")
+                On Error Resume Next
+                colRng.Validation.Delete
+                colRng.Validation.Add Type:=3, AlertStyle:=1, Formula1:=listStr ' 3=xlValidateList
+                On Error GoTo 0
+            ElseIf rule.Exists("HasMin") And rule.Exists("HasMax") Then
+                If CBool(rule.Item("HasMin")) And CBool(rule.Item("HasMax")) Then
+                    If IsNumeric(rule.Item("MinVal")) And IsNumeric(rule.Item("MaxVal")) Then
+                        On Error Resume Next
+                        colRng.Validation.Delete
+                        colRng.Validation.Add Type:=2, AlertStyle:=1, Operator:=1, _
+                            Formula1:=CStr(rule.Item("MinVal")), Formula2:=CStr(rule.Item("MaxVal")) ' 2=xlValidateDecimal, 1=xlBetween
+                        On Error GoTo 0
+                    End If
+                End If
+            End If
+        End If
+    Next c
+
+    Set ApplyToExcelRange = Me
+End Function
 
 Public Function Validate(ByVal TargetDf As cDataFrame) As Boolean
     If TargetDf Is Nothing Then
@@ -264,6 +377,35 @@ Public Function Validate(ByVal TargetDf As cDataFrame) As Boolean
                         End If
                     End If
 
+                    ' Check 6b: RegExp Pattern
+                    If rule.Exists("RegexPattern") Then
+                        Dim rx As Object
+                        Set rx = CreateObject("VBScript.RegExp")
+                        rx.Pattern = CStr(rule.Item("RegexPattern"))
+                        rx.IgnoreCase = CBool(rule.Item("RegexIgnoreCase"))
+                        rx.Global = False
+                        If Not rx.Test(CStr(v)) Then
+                            mIsValid = False
+                            failedRowTracker.Item(r) = True
+                            AddError r, colName, v, "REGEX_MISMATCH", _
+                                     "Value '" & CStr(v) & "' failed regex '" & rx.Pattern & "'."
+                        End If
+                    End If
+
+                    ' Check 6c: String Length
+                    If rule.Exists("MinLen") Then
+                        Dim sLen As Long, minL As Long, maxL As Long
+                        sLen = Len(CStr(v))
+                        minL = CLng(rule.Item("MinLen"))
+                        maxL = CLng(rule.Item("MaxLen"))
+                        If sLen < minL Or (maxL >= 0 And sLen > maxL) Then
+                            mIsValid = False
+                            failedRowTracker.Item(r) = True
+                            AddError r, colName, v, "LENGTH_VIOLATION", _
+                                     "Length " & sLen & " outside [" & minL & ", " & maxL & "]."
+                        End If
+                    End If
+
                     ' Check 7: Uniqueness
                     If isUnique Then
                         Dim sKey As String
@@ -281,6 +423,45 @@ Public Function Validate(ByVal TargetDf As cDataFrame) As Boolean
             Next r
         End If
     Next i
+
+    ' Cross-Column Rules
+    Dim crObj As Variant, cr As Object
+    Dim lCol As cColumn, rCol As cColumn
+    Dim lVal As Variant, rVal As Variant, crPass As Boolean, rowI As Long
+    For Each crObj In mCrossRules
+        Set cr = crObj
+        Dim lName As String, opStr As String, rName As String, descStr As String
+        lName = CStr(cr.Item("LeftCol"))
+        opStr = CStr(cr.Item("Operator"))
+        rName = CStr(cr.Item("RightCol"))
+        descStr = CStr(cr.Item("Description"))
+        If TargetDf.HasColumn(lName) And TargetDf.HasColumn(rName) Then
+            Set lCol = TargetDf.Column(lName)
+            Set rCol = TargetDf.Column(rName)
+            For rowI = 1 To TargetDf.RowCount
+                lVal = lCol.Item(rowI)
+                rVal = rCol.Item(rowI)
+                If Not IsEmpty(lVal) And Not IsNull(lVal) And Not IsEmpty(rVal) And Not IsNull(rVal) Then
+                    crPass = True
+                    Select Case opStr
+                        Case "=", "==": crPass = (lVal = rVal)
+                        Case "<>", "!=": crPass = (lVal <> rVal)
+                        Case ">": crPass = (lVal > rVal)
+                        Case ">=": crPass = (lVal >= rVal)
+                        Case "<": crPass = (lVal < rVal)
+                        Case "<=": crPass = (lVal <= rVal)
+                    End Select
+                    If Not crPass Then
+                        mIsValid = False
+                        failedRowTracker.Item(rowI) = True
+                        Dim crMsg As String
+                        crMsg = IIf(Len(descStr) > 0, descStr, lName & " (" & CStr(lVal) & ") " & opStr & " " & rName & " (" & CStr(rVal) & ") failed.")
+                        AddError rowI, lName, lVal, "CROSS_COLUMN_RULE", crMsg
+                    End If
+                End If
+            Next rowI
+        End If
+    Next crObj
 
     mFailedRowsCount = failedRowTracker.Count
     Validate = mIsValid

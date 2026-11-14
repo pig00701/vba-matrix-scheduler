@@ -2167,7 +2167,10 @@ Public Function ParseFormulaTemplate(ByVal Template As String, _
 
         If mUseStructuredReferences And Not (mListObject Is Nothing) Then
             Dim structRef As String
-            structRef = "[@" & cName & "]"
+            structRef = FormatStructuredColumnRef(cName)
+            If InStr(1, result, atTokenToFind, vbTextCompare) > 0 Then
+                result = Replace(result, atTokenToFind, structRef, , , vbTextCompare)
+            End If
             If InStr(1, result, tokenToFind, vbTextCompare) > 0 Then
                 result = Replace(result, tokenToFind, structRef, , , vbTextCompare)
             End If
@@ -2420,4 +2423,178 @@ Private Function ParseBool(ByVal Val As Variant, Optional ByVal DefaultVal As Bo
     Else
         ParseBool = DefaultVal
     End If
+End Function
+
+' ==============================================================================
+' Excel 365 Dynamic Array Generators, Syntax Validator & Structured Ref Escaping
+' ==============================================================================
+
+Public Function SetFilterFormula(ByVal AnchorCellOrColKey As Variant, _
+                                 ByVal ReturnRangeOrCol As Variant, _
+                                 ByVal ConditionTemplate As String, _
+                                 Optional ByVal IfEmpty As String = """""") As cFormulaEngine
+    CheckAttached "SetFilterFormula"
+    Dim arrRange As String
+    arrRange = ResolveSpillRangeArg(ReturnRangeOrCol)
+    Dim condExpr As String
+    condExpr = ExpandColumnRangeTokens(TranslateSingleQuoteLiterals(ConditionTemplate))
+    Dim fmla As String
+    fmla = "=FILTER(" & arrRange & ", " & condExpr & ", " & IfEmpty & ")"
+    Me.SetSpillFormula AnchorCellOrColKey, fmla, PreferFormula2:=True
+    Set SetFilterFormula = Me
+End Function
+
+Public Function SetUniqueFormula(ByVal AnchorCellOrColKey As Variant, _
+                                 ByVal SourceColOrRange As Variant, _
+                                 Optional ByVal ByCol As Boolean = False, _
+                                 Optional ByVal ExactlyOnce As Boolean = False) As cFormulaEngine
+    CheckAttached "SetUniqueFormula"
+    Dim srcRange As String
+    srcRange = ResolveSpillRangeArg(SourceColOrRange)
+    Dim fmla As String
+    fmla = "=UNIQUE(" & srcRange & ", " & IIf(ByCol, "TRUE", "FALSE") & ", " & IIf(ExactlyOnce, "TRUE", "FALSE") & ")"
+    Me.SetSpillFormula AnchorCellOrColKey, fmla, PreferFormula2:=True
+    Set SetUniqueFormula = Me
+End Function
+
+Public Function SetSortFormula(ByVal AnchorCellOrColKey As Variant, _
+                               ByVal SourceColOrRange As Variant, _
+                               Optional ByVal SortIndex As Long = 1, _
+                               Optional ByVal SortOrder As Long = 1, _
+                               Optional ByVal ByCol As Boolean = False) As cFormulaEngine
+    CheckAttached "SetSortFormula"
+    Dim srcRange As String
+    srcRange = ResolveSpillRangeArg(SourceColOrRange)
+    Dim fmla As String
+    fmla = "=SORT(" & srcRange & ", " & CStr(SortIndex) & ", " & CStr(SortOrder) & ", " & IIf(ByCol, "TRUE", "FALSE") & ")"
+    Me.SetSpillFormula AnchorCellOrColKey, fmla, PreferFormula2:=True
+    Set SetSortFormula = Me
+End Function
+
+Public Function ValidateFormulaSyntax(ByVal FormulaStr As String) As Boolean
+    Dim s As String
+    s = Trim$(FormulaStr)
+    If Len(s) < 2 Then Exit Function
+    If Left$(s, 1) <> "=" Then Exit Function
+
+    Dim inQuotes As Boolean
+    Dim parenDepth As Long
+    Dim bracketDepth As Long
+    Dim i As Long
+    Dim ch As String
+    Dim prevCh As String
+
+    For i = 1 To Len(s)
+        ch = Mid$(s, i, 1)
+        If i > 1 Then prevCh = Mid$(s, i - 1, 1) Else prevCh = ""
+
+        If ch = """" Then
+            inQuotes = Not inQuotes
+        ElseIf Not inQuotes Then
+            If ch = "(" Then
+                parenDepth = parenDepth + 1
+            ElseIf ch = ")" Then
+                parenDepth = parenDepth - 1
+                If parenDepth < 0 Then Exit Function
+            ElseIf ch = "[" And prevCh <> "'" Then
+                bracketDepth = bracketDepth + 1
+            ElseIf ch = "]" And prevCh <> "'" Then
+                bracketDepth = bracketDepth - 1
+                If bracketDepth < 0 Then Exit Function
+            End If
+        End If
+    Next i
+
+    If inQuotes Then Exit Function
+    If parenDepth <> 0 Then Exit Function
+    If bracketDepth <> 0 Then Exit Function
+
+    ValidateFormulaSyntax = True
+End Function
+
+Private Function FormatStructuredColumnRef(ByVal ColName As String) As String
+    Dim escaped As String
+    escaped = Replace(ColName, "'", "''")
+    escaped = Replace(escaped, "#", "'#")
+    escaped = Replace(escaped, "[", "'[")
+    escaped = Replace(escaped, "]", "']")
+
+    Dim needsBrackets As Boolean
+    If escaped <> ColName Then
+        needsBrackets = True
+    Else
+        Dim specialChars As String
+        specialChars = " -+*/()&=<>.,:;!@$%^~"
+        Dim idx As Long
+        For idx = 1 To Len(specialChars)
+            If InStr(1, ColName, Mid$(specialChars, idx, 1), vbBinaryCompare) > 0 Then
+                needsBrackets = True
+                Exit For
+            End If
+        Next idx
+    End If
+
+    If needsBrackets Then
+        FormatStructuredColumnRef = "[@[" & escaped & "]]"
+    Else
+        FormatStructuredColumnRef = "[@" & escaped & "]"
+    End If
+End Function
+
+Private Function ResolveSpillRangeArg(ByVal ColOrRange As Variant) As String
+    Dim firstRow As Long, lastRow As Long
+    firstRow = mDataBodyRange.Row
+    lastRow = mDataBodyRange.Row + mRowCount - 1
+
+    If IsNumeric(ColOrRange) Then
+        Dim cIdxNum As Long
+        cIdxNum = CLng(ColOrRange)
+        If cIdxNum >= 1 And cIdxNum <= mColCount Then
+            Dim letNum As String
+            letNum = ColIndexToLetter(mDataBodyRange.Column + cIdxNum - 1)
+            ResolveSpillRangeArg = letNum & CStr(firstRow) & ":" & letNum & CStr(lastRow)
+            Exit Function
+        End If
+    ElseIf VarType(ColOrRange) = vbString Then
+        Dim sKey As String
+        sKey = CStr(ColOrRange)
+        If mColIndexMap.Exists(sKey) Then
+            Dim cIdxStr As Long
+            cIdxStr = mColIndexMap.Item(sKey)
+            Dim letStr As String
+            letStr = ColIndexToLetter(mDataBodyRange.Column + cIdxStr - 1)
+            ResolveSpillRangeArg = letStr & CStr(firstRow) & ":" & letStr & CStr(lastRow)
+            Exit Function
+        End If
+    End If
+
+    ResolveSpillRangeArg = CStr(ColOrRange)
+End Function
+
+Private Function ExpandColumnRangeTokens(ByVal Expr As String) As String
+    Dim res As String
+    res = Expr
+    Dim firstRow As Long, lastRow As Long
+    firstRow = mDataBodyRange.Row
+    lastRow = mDataBodyRange.Row + mRowCount - 1
+
+    Dim colKey As Variant
+    For Each colKey In mColIndexMap.Keys
+        Dim cName As String
+        cName = CStr(colKey)
+        Dim cIdx As Long
+        cIdx = mColIndexMap.Item(colKey)
+        Dim colLet As String
+        colLet = ColIndexToLetter(mDataBodyRange.Column + cIdx - 1)
+        Dim rngRef As String
+        rngRef = colLet & CStr(firstRow) & ":" & colLet & CStr(lastRow)
+
+        Dim tok As String
+        tok = "[" & cName & "]"
+        If InStr(1, res, tok, vbTextCompare) > 0 Then
+            res = Replace(res, tok, rngRef, , , vbTextCompare)
+        End If
+    Next colKey
+
+    ExpandColumnRangeTokens = res
 End Function

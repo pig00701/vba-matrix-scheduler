@@ -56,6 +56,7 @@ Private mMaxCol As Long
 Private mInitialTopLeft As Object
 Private mWarnings As Collection
 Private mLastTableStyler As cTableStyler
+Private mLastFormulaEngine As cFormulaEngine
 Private mLastTableStartRow As Long
 Private mLastTableEndRow As Long
 
@@ -95,6 +96,7 @@ Private Sub Class_Initialize()
     mLastTableStartRow = 0
     mLastTableEndRow = 0
     Set mLastTableStyler = Nothing
+    Set mLastFormulaEngine = Nothing
     Set mWarnings = New Collection
 End Sub
 
@@ -103,6 +105,7 @@ Private Sub Class_Terminate()
         EndUpdate
     End If
     Set mLastTableStyler = Nothing
+    Set mLastFormulaEngine = Nothing
     Set mWorksheet = Nothing
     Set mInitialTopLeft = Nothing
     Set mWarnings = Nothing
@@ -573,6 +576,7 @@ Public Function AddTable(ByVal Df As cDataFrame, _
 
     ' Advance current row (table + one blank gap row)
     Set mLastTableStyler = styler
+    Set mLastFormulaEngine = Nothing
     mLastTableStartRow = headerRow
     mLastTableEndRow = lastRow
     mCurrentRow = lastRow + 2
@@ -1145,10 +1149,32 @@ Public Function ExportPDF(ByVal OutputFilePath As String) As cReportBuilder
     If Len(Trim$(OutputFilePath)) = 0 Then
         Err.Raise 5, SRC & ".ExportPDF", "OutputFilePath cannot be blank."
     End If
+
+    Dim fso As Object
+    Set fso = CreateObject("Scripting.FileSystemObject")
+    Dim parentDir As String
+    parentDir = fso.GetParentFolderName(OutputFilePath)
+    If Len(parentDir) > 0 Then
+        If Not fso.FolderExists(parentDir) Then
+            Err.Raise 70, SRC & ".ExportPDF", _
+                "Failed to export PDF to '" & OutputFilePath & "': target folder does not exist."
+        End If
+    End If
+
+    On Error GoTo ErrPDF
     mWorksheet.ExportAsFixedFormat Type:=0, Filename:=OutputFilePath, Quality:=0, _
                                    IncludeDocProperties:=True, IgnorePrintAreas:=False, _
                                    OpenAfterPublish:=False
+    On Error GoTo 0
     Set ExportPDF = Me
+    Exit Function
+
+ErrPDF:
+    Dim errMsg As String
+    errMsg = Err.Description
+    On Error GoTo 0
+    Err.Raise 70, SRC & ".ExportPDF", _
+        "Failed to export PDF to '" & OutputFilePath & "' (file may be locked/open or path invalid): " & errMsg
 End Function
 
 ' Cleans a sheet name to adhere to Excel's 31-character limit and invalid character rules.
@@ -1191,27 +1217,38 @@ Public Function BuildMultiSheetReport(ByVal TargetWorkbook As Object, _
         Err.Raise 5, SRC & ".BuildMultiSheetReport", "GroupColumn '" & GroupColumn & "' not found in DataFrame."
     End If
 
-    Dim splits As Collection
+    Dim splits As Object
     Set splits = Df.SplitBy(GroupColumn)
 
-    Dim groupColObj As cColumn
-    Set groupColObj = Df.Column(GroupColumn)
     Dim uniqueGroups As Variant
-    uniqueGroups = groupColObj.Unique()
+    uniqueGroups = splits.Keys
+
+    Dim usedNames As Object
+    Set usedNames = CreateObject("Scripting.Dictionary")
+    usedNames.CompareMode = 1
+    Dim existingWs As Object
+    For Each existingWs In TargetWorkbook.Worksheets
+        If Not usedNames.Exists(existingWs.Name) Then
+            usedNames.Add existingWs.Name, True
+        End If
+    Next existingWs
 
     Dim createdSheets As New Collection
     Dim wsToc As Object, wsGrp As Object, childRb As cReportBuilder
     Dim i As Long, grpVal As String, safeName As String
     Dim dfSub As cDataFrame
+    Dim sheetNames() As String
+    ReDim sheetNames(LBound(uniqueGroups) To UBound(uniqueGroups))
 
     ' 1. Create individual group sheets
     For i = LBound(uniqueGroups) To UBound(uniqueGroups)
         grpVal = CStr(uniqueGroups(i))
-        safeName = SanitizeSheetName(grpVal)
+        safeName = MakeUniqueSheetName(grpVal, usedNames)
+        sheetNames(i) = safeName
         Set wsGrp = TargetWorkbook.Worksheets.Add
         wsGrp.Name = safeName
 
-        Set dfSub = splits.Item(i - LBound(uniqueGroups) + 1)
+        Set dfSub = splits.Item(grpVal)
 
         Set childRb = New cReportBuilder
         childRb.QuickReport wsGrp, dfSub, Title:=TitlePrefix & " - " & grpVal, Theme:=Theme
@@ -1220,7 +1257,7 @@ Public Function BuildMultiSheetReport(ByVal TargetWorkbook As Object, _
 
     ' 2. Create Master Table of Contents Sheet
     Set wsToc = TargetWorkbook.Worksheets.Add(Before:=TargetWorkbook.Worksheets(1))
-    wsToc.Name = SanitizeSheetName(TocSheetName)
+    wsToc.Name = MakeUniqueSheetName(TocSheetName, usedNames)
 
     Dim tocRb As New cReportBuilder
     tocRb.Attach wsToc, "B2"
@@ -1235,7 +1272,7 @@ Public Function BuildMultiSheetReport(ByVal TargetWorkbook As Object, _
 
     For i = LBound(uniqueGroups) To UBound(uniqueGroups)
         grpVal = CStr(uniqueGroups(i))
-        Set dfSub = splits.Item(i - LBound(uniqueGroups) + 1)
+        Set dfSub = splits.Item(grpVal)
         dfToc.AddRow i - LBound(uniqueGroups) + 1, grpVal, dfSub.RowCount
     Next i
 
@@ -1425,6 +1462,146 @@ End Property
 Public Property Get LastTableStyler() As cTableStyler
     Set LastTableStyler = mLastTableStyler
 End Property
+
+Public Property Get LastFormulaEngine() As cFormulaEngine
+    Set LastFormulaEngine = mLastFormulaEngine
+End Property
+
+Public Function AttachFormulaEngine() As cFormulaEngine
+    CheckAttached "AttachFormulaEngine"
+    If mLastTableStyler Is Nothing Then
+        Err.Raise 91, SRC & ".AttachFormulaEngine", "No table has been added to this report yet."
+    End If
+    Dim fe As New cFormulaEngine
+    fe.Attach mLastTableStyler.TableRange, HasHeaders:=True
+    Set mLastFormulaEngine = fe
+    Set AttachFormulaEngine = fe
+End Function
+
+Public Function AddFormulaColumn(ByVal ColumnName As String, _
+                                 ByVal FormulaTemplate As String, _
+                                 Optional ByVal NumberFormat As String = "") As cReportBuilder
+    CheckAttached "AddFormulaColumn"
+    If mLastTableStyler Is Nothing Then
+        Err.Raise 91, SRC & ".AddFormulaColumn", "No table has been added to this report yet."
+    End If
+    If Len(Trim$(ColumnName)) = 0 Then
+        Err.Raise 5, SRC & ".AddFormulaColumn", "ColumnName cannot be blank."
+    End If
+
+    Dim newColIdx As Long
+    newColIdx = mLastTableStyler.ColumnCount + 1
+    Dim topLeft As Object
+    Set topLeft = mLastTableStyler.TopLeftCell
+    Dim hdrCell As Object
+    Set hdrCell = topLeft.Offset(0, newColIdx - 1)
+    hdrCell.NumberFormat = XL_TEXT_FORMAT
+    hdrCell.Value = ColumnName
+
+    If mLastTableStyler.ColumnCount >= 1 Then
+        Dim prevHdr As Object
+        Set prevHdr = topLeft.Offset(0, newColIdx - 2)
+        hdrCell.Font.Name = prevHdr.Font.Name
+        hdrCell.Font.Size = prevHdr.Font.Size
+        hdrCell.Font.Bold = prevHdr.Font.Bold
+        hdrCell.Font.Color = prevHdr.Font.Color
+        hdrCell.Interior.Color = prevHdr.Interior.Color
+        hdrCell.HorizontalAlignment = prevHdr.HorizontalAlignment
+        hdrCell.VerticalAlignment = prevHdr.VerticalAlignment
+    End If
+
+    Dim dataRows As Long
+    dataRows = mLastTableStyler.RowCount
+    Dim expandedRange As Object
+    Set expandedRange = mWorksheet.Range(topLeft, topLeft.Offset(dataRows, newColIdx - 1))
+
+    Dim fe As New cFormulaEngine
+    fe.Attach expandedRange, HasHeaders:=True
+    If dataRows > 0 Then
+        fe.SetColumnFormula ColumnName, FormulaTemplate
+        If Len(Trim$(NumberFormat)) > 0 Then
+            fe.DataBodyRange.Columns(newColIdx).NumberFormat = NumberFormat
+        End If
+    End If
+
+    Set mLastFormulaEngine = fe
+    Dim absEndCol As Long
+    absEndCol = topLeft.Column + newColIdx - 1
+    If absEndCol > mMaxCol Then mMaxCol = absEndCol
+
+    Set AddFormulaColumn = Me
+End Function
+
+Public Function AddSparkline(ByVal SourceRange As String, _
+                             Optional ByVal SparklineType As Long = 1, _
+                             Optional ByVal RowHeight As Double = 28) As cReportBuilder
+    CheckAttached "AddSparkline"
+    If Len(Trim$(SourceRange)) = 0 Then
+        Err.Raise 5, SRC & ".AddSparkline", "SourceRange cannot be blank."
+    End If
+
+    Dim destCell As Object
+    Set destCell = mWorksheet.Cells(mCurrentRow, mStartCol)
+    If RowHeight > 0 Then destCell.EntireRow.RowHeight = RowHeight
+
+    Dim sg As Object
+    Set sg = destCell.SparklineGroups.Add(Type:=SparklineType, SourceData:=SourceRange)
+    mCurrentRow = mCurrentRow + 2
+    Set AddSparkline = Me
+End Function
+
+Public Function AddImage(ByVal ImagePath As String, _
+                         Optional ByVal WidthPts As Double = 0, _
+                         Optional ByVal HeightPts As Double = 0) As cReportBuilder
+    CheckAttached "AddImage"
+    If Len(Trim$(ImagePath)) = 0 Then
+        Err.Raise 5, SRC & ".AddImage", "ImagePath cannot be blank."
+    End If
+    If Len(Dir$(ImagePath)) = 0 Then
+        Err.Raise 53, SRC & ".AddImage", "Image file not found: '" & ImagePath & "'"
+    End If
+
+    Dim anchorCell As Object
+    Set anchorCell = mWorksheet.Cells(mCurrentRow, mStartCol)
+    Dim wParam As Double, hParam As Double
+    wParam = IIf(WidthPts > 0, WidthPts, -1)
+    hParam = IIf(HeightPts > 0, HeightPts, -1)
+
+    Dim shp As Object
+    Set shp = mWorksheet.Shapes.AddPicture(Filename:=ImagePath, LinkToFile:=0, SaveWithDocument:=-1, _
+                                           Left:=anchorCell.Left, Top:=anchorCell.Top, _
+                                           Width:=wParam, Height:=hParam)
+
+    Dim bottomRow As Long
+    bottomRow = shp.BottomRightCell.Row
+    If bottomRow < mCurrentRow Then bottomRow = mCurrentRow
+    mCurrentRow = bottomRow + 2
+    Set AddImage = Me
+End Function
+
+Private Function MakeUniqueSheetName(ByVal BaseName As String, ByVal UsedNames As Object) As String
+    Dim sanitized As String
+    sanitized = SanitizeSheetName(BaseName)
+    If Not UsedNames.Exists(sanitized) Then
+        UsedNames.Add sanitized, True
+        MakeUniqueSheetName = sanitized
+        Exit Function
+    End If
+
+    Dim suffixIdx As Long
+    suffixIdx = 2
+    Dim candidate As String, suffixStr As String
+    Do
+        suffixStr = "_" & CStr(suffixIdx)
+        candidate = Left$(sanitized, 31 - Len(suffixStr)) & suffixStr
+        If Not UsedNames.Exists(candidate) Then
+            UsedNames.Add candidate, True
+            MakeUniqueSheetName = candidate
+            Exit Function
+        End If
+        suffixIdx = suffixIdx + 1
+    Loop
+End Function
 
 Public Property Get LastTableStartRow() As Long
     LastTableStartRow = mLastTableStartRow

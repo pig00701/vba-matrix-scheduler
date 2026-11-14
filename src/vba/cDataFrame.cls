@@ -1091,8 +1091,10 @@ End Function
 ' OnKey accepts a single column key (String/Long) or a 1D Array of column keys.
 ' Supports "INNER", "LEFT", "RIGHT", "FULL"/"OUTER", "LEFT_ANTI"/"ANTI", and "LEFT_SEMI"/"SEMI".
 Public Function Merge(ByVal RightTable As cDataFrame, _
-                      ByVal OnKey As Variant, _
-                      Optional ByVal How As String = "INNER") As cDataFrame
+                      Optional ByVal OnKey As Variant = Empty, _
+                      Optional ByVal How As String = "INNER", _
+                      Optional ByVal LeftOn As Variant = Empty, _
+                      Optional ByVal RightOn As Variant = Empty) As cDataFrame
     If RightTable Is Nothing Then
         Err.Raise 91, "cDataFrame.Merge", "RightTable cannot be Nothing."
     End If
@@ -1104,37 +1106,118 @@ Public Function Merge(ByVal RightTable As cDataFrame, _
     If joinType = "SEMI" Then joinType = "LEFT_SEMI"
 
     If joinType <> "INNER" And joinType <> "LEFT" And joinType <> "RIGHT" And _
-       joinType <> "FULL" And joinType <> "LEFT_ANTI" And joinType <> "LEFT_SEMI" Then
+       joinType <> "FULL" And joinType <> "LEFT_ANTI" And joinType <> "LEFT_SEMI" And _
+       joinType <> "CROSS" Then
         Err.Raise 5, "cDataFrame.Merge", _
-            "Unsupported join type: '" & How & "'. Supported: INNER, LEFT, RIGHT, FULL, LEFT_ANTI, LEFT_SEMI"
+            "Unsupported join type: '" & How & "'. Supported: INNER, LEFT, RIGHT, FULL, LEFT_ANTI, LEFT_SEMI, CROSS"
+    End If
+
+    ' 0. Fast path for CROSS join (Cartesian product, no keys required)
+    If joinType = "CROSS" Then
+        Dim crossDf As New cDataFrame
+        Dim cLeftNames() As String, cRightNames() As String
+        cLeftNames = Me.ColumnNames()
+        cRightNames = RightTable.ColumnNames()
+        Dim cNumL As Long, cNumR As Long
+        cNumL = Me.ColumnCount
+        cNumR = RightTable.ColumnCount
+
+        Dim cLCols() As cColumn, cRCols() As cColumn
+        If cNumL > 0 Then ReDim cLCols(1 To cNumL)
+        If cNumR > 0 Then ReDim cRCols(1 To cNumR)
+
+        Dim cCrossIdx As Long, cName As String, cOutName As String, cDup As Long
+        For cCrossIdx = 1 To cNumL
+            cName = cLeftNames(cCrossIdx)
+            Set cLCols(cCrossIdx) = mCols.Item(cName)
+            If RightTable.HasColumn(cName) Then
+                cOutName = cName & "_left"
+            Else
+                cOutName = cName
+            End If
+            crossDf.AddColumn cOutName
+        Next cCrossIdx
+        For cCrossIdx = 1 To cNumR
+            cName = cRightNames(cCrossIdx)
+            Set cRCols(cCrossIdx) = RightTable.Column(cName)
+            If Me.HasColumn(cName) Then
+                cOutName = cName & "_right"
+            Else
+                cOutName = cName
+            End If
+            cDup = 1
+            Do While crossDf.HasColumn(cOutName)
+                cDup = cDup + 1
+                cOutName = IIf(Me.HasColumn(cName), cName & "_right", cName) & "_" & cDup
+            Loop
+            crossDf.AddColumn cOutName
+        Next cCrossIdx
+
+        If mRowCount > 0 And RightTable.RowCount > 0 Then
+            Dim crossRowVals() As Variant
+            ReDim crossRowVals(0 To cNumL + cNumR - 1)
+            Dim crL As Long, crR As Long
+            For crL = 1 To mRowCount
+                For cCrossIdx = 1 To cNumL
+                    crossRowVals(cCrossIdx - 1) = cLCols(cCrossIdx).Item(crL)
+                Next cCrossIdx
+                For crR = 1 To RightTable.RowCount
+                    For cCrossIdx = 1 To cNumR
+                        crossRowVals(cNumL + cCrossIdx - 1) = cRCols(cCrossIdx).Item(crR)
+                    Next cCrossIdx
+                    crossDf.AddRow crossRowVals
+                Next crR
+            Next crL
+        End If
+
+        Set Merge = crossDf
+        Exit Function
     End If
 
     ' 1. Parse and validate join key(s)
+    Dim leftKeyInput As Variant, rightKeyInput As Variant
+    If Not IsEmpty(LeftOn) Or Not IsEmpty(RightOn) Then
+        If IsEmpty(LeftOn) Or IsEmpty(RightOn) Then
+            Err.Raise 5, "cDataFrame.Merge", "Both LeftOn and RightOn must be provided together."
+        End If
+        leftKeyInput = LeftOn
+        rightKeyInput = RightOn
+    Else
+        If IsEmpty(OnKey) Then
+            Err.Raise 5, "cDataFrame.Merge", "OnKey (or LeftOn and RightOn) must be provided."
+        End If
+        leftKeyInput = OnKey
+        rightKeyInput = OnKey
+    End If
+
     Dim leftKeyNames() As String
     Dim rightKeyNames() As String
     Dim numKeys As Long
     Dim k As Long
 
-    If IsArray(OnKey) Then
-        Dim lbK As Long, ubK As Long
-        lbK = LBound(OnKey)
-        ubK = UBound(OnKey)
-        numKeys = ubK - lbK + 1
-        If numKeys <= 0 Then
-            Err.Raise 5, "cDataFrame.Merge", "OnKey array cannot be empty."
+    If IsArray(leftKeyInput) Or IsArray(rightKeyInput) Then
+        If Not (IsArray(leftKeyInput) And IsArray(rightKeyInput)) Then
+            Err.Raise 5, "cDataFrame.Merge", "LeftOn and RightOn must both be arrays or both be scalar keys."
+        End If
+        Dim lbLK As Long, ubLK As Long, lbRK As Long, ubRK As Long
+        lbLK = LBound(leftKeyInput): ubLK = UBound(leftKeyInput)
+        lbRK = LBound(rightKeyInput): ubRK = UBound(rightKeyInput)
+        numKeys = ubLK - lbLK + 1
+        If numKeys <= 0 Or (ubRK - lbRK + 1) <> numKeys Then
+            Err.Raise 5, "cDataFrame.Merge", "Join key arrays must be non-empty and of equal length."
         End If
         ReDim leftKeyNames(1 To numKeys)
         ReDim rightKeyNames(1 To numKeys)
         For k = 1 To numKeys
-            leftKeyNames(k) = ResolveColName(OnKey(lbK + k - 1))
-            rightKeyNames(k) = RightTable.ResolveColName(OnKey(lbK + k - 1))
+            leftKeyNames(k) = ResolveColName(leftKeyInput(lbLK + k - 1))
+            rightKeyNames(k) = RightTable.ResolveColName(rightKeyInput(lbRK + k - 1))
         Next k
     Else
         numKeys = 1
         ReDim leftKeyNames(1 To 1)
         ReDim rightKeyNames(1 To 1)
-        leftKeyNames(1) = ResolveColName(OnKey)
-        rightKeyNames(1) = RightTable.ResolveColName(OnKey)
+        leftKeyNames(1) = ResolveColName(leftKeyInput)
+        rightKeyNames(1) = RightTable.ResolveColName(rightKeyInput)
     End If
 
     Dim leftKeyCols() As cColumn
@@ -1574,6 +1657,9 @@ Public Function GroupBy(ByVal GroupColumns As Variant, _
     Dim mins() As Variant
     Dim maxs() As Variant
     Dim hasMinMax() As Boolean
+    Dim groupCollections() As Object
+    Dim needCollection() As Boolean
+    Dim anyCollection As Boolean
 
     ReDim sums(1 To numUniqueGroups, 1 To numAggs)
     ReDim counts(1 To numUniqueGroups, 1 To numAggs)
@@ -1581,8 +1667,19 @@ Public Function GroupBy(ByVal GroupColumns As Variant, _
     ReDim mins(1 To numUniqueGroups, 1 To numAggs)
     ReDim maxs(1 To numUniqueGroups, 1 To numAggs)
     ReDim hasMinMax(1 To numUniqueGroups, 1 To numAggs)
+    ReDim needCollection(1 To numAggs)
+    For a = 1 To numAggs
+        If normFuncs(a) = "MEDIAN" Or normFuncs(a) = "STD" Or normFuncs(a) = "NUNIQUE" Then
+            needCollection(a) = True
+            anyCollection = True
+        End If
+    Next a
+    If anyCollection Then
+        ReDim groupCollections(1 To numUniqueGroups, 1 To numAggs)
+    End If
 
     Dim aggCol As cColumn, fType As String, v As Variant
+    Dim tok As String
     For a = 1 To numAggs
         Set aggCol = aggColObjs(a)
         fType = normFuncs(a)
@@ -1612,6 +1709,22 @@ Public Function GroupBy(ByVal GroupColumns As Variant, _
                         hasMinMax(gIdx, a) = True
                     ElseIf CompareSortValues(v, maxs(gIdx, a)) > 0 Then
                         maxs(gIdx, a) = v
+                    End If
+                ElseIf fType = "MEDIAN" Or fType = "STD" Then
+                    If IsNumeric(v) Then
+                        If groupCollections(gIdx, a) Is Nothing Then
+                            Set groupCollections(gIdx, a) = New Collection
+                        End If
+                        groupCollections(gIdx, a).Add CDbl(v)
+                    End If
+                ElseIf fType = "NUNIQUE" Then
+                    If groupCollections(gIdx, a) Is Nothing Then
+                        Set groupCollections(gIdx, a) = CreateObject("Scripting.Dictionary")
+                        groupCollections(gIdx, a).CompareMode = 1
+                    End If
+                    tok = SafeDedupToken(v)
+                    If Not groupCollections(gIdx, a).Exists(tok) Then
+                        groupCollections(gIdx, a).Add tok, True
                     End If
                 End If
             End If
@@ -1655,6 +1768,16 @@ Public Function GroupBy(ByVal GroupColumns As Variant, _
                         rowVals(numGroupCols + a - 1) = maxs(gIdx, a)
                     Else
                         rowVals(numGroupCols + a - 1) = Empty
+                    End If
+                Case "MEDIAN"
+                    rowVals(numGroupCols + a - 1) = ComputeCollectionMedian(groupCollections(gIdx, a))
+                Case "STD"
+                    rowVals(numGroupCols + a - 1) = ComputeCollectionStdDev(groupCollections(gIdx, a))
+                Case "NUNIQUE"
+                    If groupCollections(gIdx, a) Is Nothing Then
+                        rowVals(numGroupCols + a - 1) = 0&
+                    Else
+                        rowVals(numGroupCols + a - 1) = CLng(groupCollections(gIdx, a).Count)
                     End If
             End Select
         Next a
@@ -1926,11 +2049,96 @@ Private Function NormalizeAggFunc(ByVal FuncName As String, ByVal Caller As Stri
             NormalizeAggFunc = "MIN"
         Case "MAX"
             NormalizeAggFunc = "MAX"
+        Case "MEDIAN"
+            NormalizeAggFunc = "MEDIAN"
+        Case "STD", "STDEV"
+            NormalizeAggFunc = "STD"
+        Case "NUNIQUE"
+            NormalizeAggFunc = "NUNIQUE"
         Case Else
             Err.Raise 5, Caller, _
-                "Unsupported aggregation function: '" & FuncName & "'. Supported: SUM, COUNT, AVG/AVERAGE, MIN, MAX"
+                "Unsupported aggregation function: '" & FuncName & "'. Supported: SUM, COUNT, AVG/AVERAGE, MIN, MAX, MEDIAN, STD, NUNIQUE"
     End Select
 End Function
+
+Private Function ComputeCollectionMedian(ByVal colObj As Collection) As Variant
+    If colObj Is Nothing Then
+        ComputeCollectionMedian = Empty
+        Exit Function
+    End If
+    Dim n As Long
+    n = colObj.Count
+    If n = 0 Then
+        ComputeCollectionMedian = Empty
+        Exit Function
+    End If
+    Dim arr() As Double
+    ReDim arr(1 To n)
+    Dim i As Long
+    For i = 1 To n
+        arr(i) = CDbl(colObj.Item(i))
+    Next i
+    QuickSortDoubles arr, 1, n
+    If n Mod 2 = 1 Then
+        ComputeCollectionMedian = arr((n + 1) \ 2)
+    Else
+        ComputeCollectionMedian = (arr(n \ 2) + arr(n \ 2 + 1)) / 2#
+    End If
+End Function
+
+Private Function ComputeCollectionStdDev(ByVal colObj As Collection) As Variant
+    If colObj Is Nothing Then
+        ComputeCollectionStdDev = Empty
+        Exit Function
+    End If
+    Dim n As Long
+    n = colObj.Count
+    If n = 0 Then
+        ComputeCollectionStdDev = Empty
+        Exit Function
+    End If
+    If n = 1 Then
+        ComputeCollectionStdDev = 0#
+        Exit Function
+    End If
+    Dim sumVal As Double, i As Long
+    For i = 1 To n
+        sumVal = sumVal + CDbl(colObj.Item(i))
+    Next i
+    Dim meanVal As Double, ss As Double, diff As Double
+    meanVal = sumVal / CDbl(n)
+    For i = 1 To n
+        diff = CDbl(colObj.Item(i)) - meanVal
+        ss = ss + diff * diff
+    Next i
+    ComputeCollectionStdDev = Sqr(ss / CDbl(n - 1))
+End Function
+
+Private Sub QuickSortDoubles(ByRef arr() As Double, ByVal lo As Long, ByVal hi As Long)
+    If lo >= hi Then Exit Sub
+    Dim i As Long, j As Long
+    Dim pivot As Double, tmp As Double
+    i = lo
+    j = hi
+    pivot = arr((lo + hi) \ 2)
+    Do While i <= j
+        Do While arr(i) < pivot
+            i = i + 1
+        Loop
+        Do While arr(j) > pivot
+            j = j - 1
+        Loop
+        If i <= j Then
+            tmp = arr(i)
+            arr(i) = arr(j)
+            arr(j) = tmp
+            i = i + 1
+            j = j - 1
+        End If
+    Loop
+    If lo < j Then QuickSortDoubles arr, lo, j
+    If i < hi Then QuickSortDoubles arr, i, hi
+End Sub
 
 Private Function SafeKeyString(ByVal v As Variant) As String
     If IsError(v) Then
@@ -4943,3 +5151,202 @@ Public Function GetConfigColor(ByVal ConfigKey As String, _
     End If
 End Function
 
+' ------------------------------------------------------------------------------
+' Pure 2D Array Export, Top-N, Sampling, Transpose & Cross-Class Bridges
+' ------------------------------------------------------------------------------
+
+' Exports the DataFrame to a 1-based 2D Variant array in memory (fast, zero-sheet overhead).
+Public Function To2DArray(Optional ByVal IncludeHeaders As Boolean = True) As Variant
+    Dim colCnt As Long
+    colCnt = mCols.Count
+    If colCnt = 0 Then
+        To2DArray = Array()
+        Exit Function
+    End If
+
+    Dim startRow As Long, totalRows As Long
+    totalRows = mRowCount + IIf(IncludeHeaders, 1, 0)
+    If totalRows = 0 Then
+        To2DArray = Array()
+        Exit Function
+    End If
+
+    Dim arr() As Variant
+    ReDim arr(1 To totalRows, 1 To colCnt)
+
+    Dim keys As Variant
+    keys = mCols.Keys
+    Dim c As Long, r As Long, targetRow As Long
+    Dim colObj As cColumn
+
+    For c = 0 To colCnt - 1
+        Set colObj = mCols.Item(keys(c))
+        If IncludeHeaders Then
+            arr(1, c + 1) = colObj.Name
+            startRow = 2
+        Else
+            startRow = 1
+        End If
+        For r = 1 To mRowCount
+            targetRow = startRow + r - 1
+            If IsObject(colObj.Item(r)) Then
+                Set arr(targetRow, c + 1) = colObj.Item(r)
+            Else
+                arr(targetRow, c + 1) = colObj.Item(r)
+            End If
+        Next r
+    Next c
+
+    To2DArray = arr
+End Function
+
+' Convenience bridge: Validates this DataFrame using a cDataValidator instance.
+Public Function Validate(ByVal Validator As cDataValidator) As Boolean
+    If Validator Is Nothing Then
+        Err.Raise 91, "cDataFrame.Validate", "Validator cannot be Nothing."
+    End If
+    Validate = Validator.Validate(Me)
+End Function
+
+' Convenience bridge: Writes DataFrame to TargetCell, applies theme via cTableStyler, and returns styler.
+Public Function ToStyledRange(ByVal TargetCell As Object, _
+                              Optional ByVal ThemeName As String = "NAVY", _
+                              Optional ByVal IncludeHeaders As Boolean = True) As cTableStyler
+    Me.ToRange TargetCell, IncludeHeaders
+    Dim styler As New cTableStyler
+    styler.Attach TargetCell, Me, IncludeHeaders
+    If Len(Trim$(ThemeName)) > 0 Then
+        styler.ApplyTheme ThemeName
+    End If
+    Set ToStyledRange = styler
+End Function
+
+' Convenience bridge: Writes DataFrame to TargetCellOrSheet and returns an attached cFormulaEngine.
+Public Function AttachFormulaEngine(ByVal TargetCellOrSheet As Object, _
+                                    Optional ByVal HasHeaders As Boolean = True) As cFormulaEngine
+    Dim fmla As New cFormulaEngine
+    fmla.AttachDataFrame TargetCellOrSheet, Me, HasHeaders
+    Set AttachFormulaEngine = fmla
+End Function
+
+' Returns the top N rows sorted descending by ColumnKey.
+Public Function NLargest(ByVal N As Long, ByVal ColumnKey As Variant) As cDataFrame
+    If N <= 0 Then
+        Set NLargest = Me.Clone(True)
+        Exit Function
+    End If
+    Dim sortedDf As cDataFrame
+    Set sortedDf = Me.Clone(False)
+    If sortedDf.RowCount > 1 Then
+        sortedDf.Sort Me.ResolveColName(ColumnKey), False
+    End If
+    Set NLargest = sortedDf.Head(N)
+End Function
+
+' Returns the bottom N rows sorted ascending by ColumnKey.
+Public Function NSmallest(ByVal N As Long, ByVal ColumnKey As Variant) As cDataFrame
+    If N <= 0 Then
+        Set NSmallest = Me.Clone(True)
+        Exit Function
+    End If
+    Dim sortedDf As cDataFrame
+    Set sortedDf = Me.Clone(False)
+    If sortedDf.RowCount > 1 Then
+        sortedDf.Sort Me.ResolveColName(ColumnKey), True
+    End If
+    Set NSmallest = sortedDf.Head(N)
+End Function
+
+' Returns a random sample of N rows (without replacement) from the DataFrame.
+Public Function Sample(ByVal N As Long, Optional ByVal Seed As Long = -1) As cDataFrame
+    Dim res As cDataFrame
+    Set res = Me.Clone(True)
+    If mRowCount = 0 Or N <= 0 Then
+        Set Sample = res
+        Exit Function
+    End If
+
+    Dim sampleCount As Long
+    sampleCount = IIf(N > mRowCount, mRowCount, N)
+
+    If Seed >= 0 Then
+        Rnd -1
+        Randomize Seed
+    Else
+        Randomize
+    End If
+
+    ' Fisher-Yates partial shuffle on row indices 1..mRowCount
+    Dim idx() As Long
+    ReDim idx(1 To mRowCount)
+    Dim i As Long, j As Long, tmp As Long
+    For i = 1 To mRowCount
+        idx(i) = i
+    Next i
+    For i = 1 To sampleCount
+        j = i + Int((mRowCount - i + 1) * Rnd)
+        tmp = idx(i)
+        idx(i) = idx(j)
+        idx(j) = tmp
+    Next i
+
+    Dim colCnt As Long
+    colCnt = mCols.Count
+    Dim keys As Variant
+    keys = mCols.Keys
+    Dim arr2D() As Variant
+    ReDim arr2D(1 To sampleCount, 1 To colCnt)
+    Dim c As Long, srcCol As cColumn
+    For c = 0 To colCnt - 1
+        Set srcCol = mCols.Item(keys(c))
+        For i = 1 To sampleCount
+            If IsObject(srcCol.Item(idx(i))) Then
+                Set arr2D(i, c + 1) = srcCol.Item(idx(i))
+            Else
+                arr2D(i, c + 1) = srcCol.Item(idx(i))
+            End If
+        Next i
+    Next c
+    res.AddRows arr2D
+
+    Set Sample = res
+End Function
+
+' Transposes rows and columns into a new DataFrame with "Field" and "Row_1".."Row_N" columns.
+Public Function Transpose() As cDataFrame
+    Dim res As New cDataFrame
+    res.AddColumn "Field"
+
+    Dim r As Long, c As Long
+    For r = 1 To mRowCount
+        res.AddColumn "Row_" & CStr(r)
+    Next r
+
+    Dim colCnt As Long
+    colCnt = mCols.Count
+    If colCnt = 0 Then
+        Set Transpose = res
+        Exit Function
+    End If
+
+    Dim keys As Variant
+    keys = mCols.Keys
+    Dim transArr() As Variant
+    ReDim transArr(1 To colCnt, 1 To mRowCount + 1)
+    Dim srcCol As cColumn
+
+    For c = 0 To colCnt - 1
+        Set srcCol = mCols.Item(keys(c))
+        transArr(c + 1, 1) = srcCol.Name
+        For r = 1 To mRowCount
+            If IsObject(srcCol.Item(r)) Then
+                Set transArr(c + 1, r + 1) = srcCol.Item(r)
+            Else
+                transArr(c + 1, r + 1) = srcCol.Item(r)
+            End If
+        Next r
+    Next c
+    res.AddRows transArr
+
+    Set Transpose = res
+End Function
