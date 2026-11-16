@@ -149,3 +149,21 @@ End Sub
 - **Author**: Technodevmoo AI Engineering
 - **Architecture**: Powered by `cDataFrame` Column-Oriented Table Store
 - **License**: MIT
+
+
+---
+
+## 9. Developer Guidelines & VBA Class Gotchas (Best Practices)
+
+When developing or calling methods in `cDataFrame` and related classes, keep in mind these key VBA language subtleties:
+
+1. **Invoke Object-Returning Methods with `Call` or `Set` (Avoid Error 449):**
+   Classes with default members (e.g., `Item(RowIndex, ColumnKey)` in `cDataFrame`) cause VBA to evaluate the default property if called as a bare statement with parentheses (`df.LoadFrom3DArray(...)`). Always use `Call df.Method(...)` or `Set df = df.Method(...)` to discard or assign the returned object cleanly without triggering `Error 449 (Argument not optional)`.
+2. **Optional Object Parameters Must Omit Default Values:**
+   VBA syntax strictly forbids default values on object parameters (`Optional ByVal TargetWorkbook As Object = Nothing` causes a compile syntax error). Use `Optional ByVal TargetWorkbook As Object` and perform `If TargetWorkbook Is Nothing Then` inside the procedure.
+3. **Keep Class Modules Fully Decoupled:**
+   Never reference standard test or runner modules (e.g. `LogPrint` in `mTestRunner.bas`) inside class modules. Standalone classes must compile cleanly in isolation.
+4. **Prevent Headless Excel COM Hangs During Automated Tests:**
+   VBE pops a modal dialog (`#32770`) on any compile/syntax error, halting headless Excel automation until the watchdog timeout fires. Always run a pre-execution compile check or employ an asynchronous Win32 dialog monitor (`WM_COMMAND` with `PostMessage`) during automated test runs.
+5. **Enforce Strict CRLF (`\r\n`) Line Endings:**
+   The VBE import mechanism on Windows requires CRLF line endings. Corrupted line breaks (`\n` or `\r\r\n`) can break the `VERSION 1.0 CLASS` header, causing class files to be imported as plain standard modules.
