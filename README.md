@@ -150,7 +150,6 @@ End Sub
 - **Architecture**: Powered by `cDataFrame` Column-Oriented Table Store
 - **License**: MIT
 
-
 ---
 
 ## 9. Developer Guidelines & VBA Class Gotchas (Best Practices)

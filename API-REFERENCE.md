@@ -441,7 +441,6 @@ classDiagram
 | จัดการ 3D Variant Array & Multi-Sheet Union/Split | cDataFrame | **< 0.050 วินาที** |
 | ทดสอบครบ 48 ชุดหมวดหมู่ฟังก์ชัน (**979 assertions**) | ทุกคลาส | **6.086 วินาที** (100% PASS) |
 
-
 ---
 
 ## 10. ข้อควรระวัง & Best Practices ในการพัฒนาและเรียกใช้ Class (VBA Class Gotchas & Debugging)
@@ -449,13 +448,16 @@ classDiagram
 รวบรวมข้อควรระวัง กฎไวยากรณ์ และแนวทางแก้ไขปัญหาที่พบบ่อยในการพัฒนาและเรียกใช้ออบเจกต์ VBA Class เพื่อป้องกันการเกิด Run-time Error และปัญหา Excel COM Freeze:
 
 ### 10.1 การเรียกใช้ Method ที่คืนค่า Class Object ที่มี Default Member (Error 449: Argument not optional)
-- **สาเหตุ:** ใน VBA เมื่อคลาสมีการกำหนด Default Property (เช่น `Attribute Item.VB_UserMemId = 0` ใน `cDataFrame` ซึ่งต้องการ 2 พารามิเตอร์ `RowIndex, ColumnKey`)
-  หากเราเรียกใช้ฟังก์ชันแบบ Statement โดยใส่วงเล็บแต่ไม่มีคีย์เวิร์ด `Call` หรือ `Set` เช่น:
+
+- **สาเหตุ:** ใน VBA เมื่อคลาสมีการกำหนด Default Property (เช่น `Attribute Item.VB_UserMemId = 0` ใน `cDataFrame` ซึ่งต้องการ 2 พารามิเตอร์ `RowIndex, ColumnKey`) หากเราเรียกใช้ฟังก์ชันแบบ Statement โดยใส่วงเล็บแต่ไม่มีคีย์เวิร์ด `Call` หรือ `Set` เช่น:
+
   ```vba
   ' ❌ ผิด: VBA จะตีความว่า df.LoadFrom3DArray คืนค่า Me ออกมา แล้ว evaluate ต่อด้วย .Item(...) ทันที
   df.LoadFrom3DArray(v3D, True, Array("Q1", "Q2"), "Quarter") ' -> Error 449: Argument not optional
   ```
+
 - **แนวทางที่ถูกต้อง:**
+
   ```vba
   ' ✅ แบบที่ 1 (แนะนำ): ใช้คำสั่ง Call อย่างชัดเจน
   Call df.LoadFrom3DArray(v3D, True, Array("Q1", "Q2"), "Quarter")
@@ -468,12 +470,16 @@ classDiagram
   ```
 
 ### 10.2 ไวยากรณ์ Optional Object Parameter ใน VBA (Syntax Error / Expected expression)
+
 - **สาเหตุ:** ภาษา VBA **ไม่อนุญาต** ให้กำหนดค่าเริ่มต้นให้กับตัวแปรประเภท Object ในพารามิเตอร์ของ Procedure เช่น:
+
   ```vba
   ' ❌ ผิด: Syntax Error / Expected: expression
   Public Function ToMultiSheets(..., Optional ByVal TargetWorkbook As Object = Nothing) As cDataFrame
   ```
+
 - **แนวทางที่ถูกต้อง:**
+
   ```vba
   ' ✅ ถูกต้อง: ละเว้นค่า default สำหรับ Object แล้วตรวจสอบ Is Nothing ภายในโค้ด
   Public Function ToMultiSheets(..., Optional ByVal TargetWorkbook As Object) As cDataFrame
@@ -486,12 +492,14 @@ classDiagram
   ```
 
 ### 10.3 ความเป็นอิสระของ Class Module (Standalone Decoupling)
+
 - **สาเหตุ:** Class Module ในสถาปัตยกรรมระดับองค์กรต้องทำงานได้ด้วยตัวเองแบบ Self-contained ห้ามเรียกใช้ Sub หรือ Function ภายนอกที่อยู่ใน Standard Module เฉพาะกิจ (เช่น เรียก `LogPrint` ของ `mTestRunner` ภายใน `cDataFrame`) เพราะเมื่อนำ Class Module ไป Import ใช้งานในโปรเจกต์อื่นที่ไม่มี Module นั้น จะทำให้เกิด **Compile error: Sub or Function not defined** ทันที
 - **แนวทางที่ถูกต้อง:**
   - แยก Core Business Logic ให้อยู่เฉพาะภายใน Class Module
   - การบันทึก Log หรือการแจ้งเตือน ให้ใช้ระบบ Event (`Event OnError`, `RaiseEvent`) หรือส่ง Callback Interface เข้ามาแทน
 
 ### 10.4 การรัน Headless Excel COM Test และการดักจับ Modal Dialog (ป้องกัน Watchdog Timeout Hang)
+
 - **สาเหตุ:** เมื่อรันชุดทดสอบอัตโนมัติผ่าน Excel COM เบื้องหลัง (`xlApp.Visible = False`) หากมี Compile Error หรือ Syntax Error ใดๆ เกิดขึ้น VBE จะเด้ง Modal Dialog Box (`#32770`) ลอยค้างอยู่เบื้องหลัง ทำให้ Excel หยุดรอให้ผู้ใช้กดปุ่ม OK ซึ่งส่งผลให้ Process ทั้งหมดค้างจนหมดเวลา Watchdog Timeout (เช่น 25–30 วินาที)
 - **แนวทางแก้ไขและดีบัก:**
   1. **คอมไพล์ก่อนรันเสมอ:** เรียกคำสั่ง Compile VBAProject ผ่าน VBE API ก่อนรัน Macro เพื่อให้ทราบข้อผิดพลาดทันทีโดยไม่ต้องรอ Dialog
@@ -499,5 +507,6 @@ classDiagram
   3. **ส่งสัญญาณปิดแบบ Asynchronous:** ใช้ `PostMessage(hwnd, WM_COMMAND, 1, btnOk)` แทน `SendMessage` เพื่อไม่ให้เธรดที่ส่งถูกบล็อก
 
 ### 10.5 การรักษารูปแบบ Line Endings (Strict CRLF `\r\n`)
+
 - **สาเหตุ:** VBE ของ Microsoft Excel ในระบบปฏิบัติการ Windows บังคับใช้ Line Ending แบบ CRLF (`\r\n`) หากไฟล์ถูกแก้ไขจนกลายเป็น LF (`\n`) หรือ Double CR (`\r\r\n`) ส่วนหัว `VERSION 1.0 CLASS` จะเสียหาย ส่งผลให้ VBE นำเข้าคลาสผิดประเภทกลายเป็น Standard Module ธรรมดา
 - **แนวทางที่ถูกต้อง:** ตรวจสอบและ normalize line ending ให้เป็น `\r\n` เสมอก่อนบันทึกไฟล์ `.cls` และ `.bas`
