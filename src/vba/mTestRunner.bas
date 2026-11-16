@@ -90,6 +90,7 @@ Public Function RunAllTests() As String
     Test_AllClassesGapCoverage
     Test_GetDataAndRangeGaps
     Test_CleanAndTransformData
+    Test_3DArrayAndMultiSheets
 
     Dim tElapsed As Double
     tElapsed = Timer - tStart
@@ -4232,6 +4233,92 @@ TestFail:
     Dim failErr As String
     failErr = Err.Description
     RecordFailure "Test_CleanAndTransformData", failErr
+End Sub
+
+
+' ------------------------------------------------------------------------------
+' Test 48: 3D Array & Multi-Sheet Operations
+' ------------------------------------------------------------------------------
+Private Sub Test_3DArrayAndMultiSheets()
+    On Error GoTo TestFail
+    LogPrint "[TEST 48] 3D Array & Multi-Sheet Operations..."
+
+    ' 1. LoadFrom3DArray
+    LogPrint "  [48.1] LoadFrom3DArray..."
+    Dim arr3D(1 To 3, 1 To 2, 1 To 2) As Variant
+    ' Layer 1: Q1
+    arr3D(1, 1, 1) = "Prod":   arr3D(1, 2, 1) = "Sales"
+    arr3D(2, 1, 1) = "Widget": arr3D(2, 2, 1) = 100
+    arr3D(3, 1, 1) = "Gadget": arr3D(3, 2, 1) = 200
+    ' Layer 2: Q2
+    arr3D(1, 1, 2) = "Prod":   arr3D(1, 2, 2) = "Sales"
+    arr3D(2, 1, 2) = "Widget": arr3D(2, 2, 2) = 150
+    arr3D(3, 1, 2) = "Gadget": arr3D(3, 2, 2) = 250
+
+    Dim df3D As New cDataFrame
+    Dim v3D As Variant
+    v3D = arr3D
+    Call df3D.LoadFrom3DArray(v3D, True, Array("Q1", "Q2"), "Quarter")
+
+    AssertEqual df3D.RowCount, 4, "LoadFrom3DArray total rows is 4 (2 per layer * 2 layers)"
+    AssertEqual df3D.ColumnCount, 3, "LoadFrom3DArray has 3 columns (Quarter, Prod, Sales)"
+    AssertEqual df3D.Column("Quarter").Item(1), "Q1", "LoadFrom3DArray row 1 Quarter is Q1"
+    AssertEqual df3D.Column("Quarter").Item(3), "Q2", "LoadFrom3DArray row 3 Quarter is Q2"
+    AssertEqual df3D.Column("Sales").Item(4), 250, "LoadFrom3DArray row 4 Sales is 250"
+
+    ' 2. To3DArray
+    LogPrint "  [48.2] To3DArray..."
+    Dim out3D As Variant
+    out3D = df3D.To3DArray("Quarter", False)
+    AssertEqual UBound(out3D, 1), 2, "To3DArray dim 1 (rows) = 2"
+    AssertEqual UBound(out3D, 2), 2, "To3DArray dim 2 (cols) = 2"
+    AssertEqual UBound(out3D, 3), 2, "To3DArray dim 3 (layers) = 2"
+    AssertEqual out3D(2, 2, 2), 250, "To3DArray layer 2 row 2 col 2 value is 250"
+
+    ' 3. ToMultiSheets & LoadFromSheets
+    LogPrint "  [48.3] ToMultiSheets..."
+    Dim xlApp As Object
+    Set xlApp = ThisWorkbook.Application
+    xlApp.DisplayAlerts = False
+    On Error Resume Next
+    ThisWorkbook.Worksheets("Q1").Delete
+    ThisWorkbook.Worksheets("Q2").Delete
+    On Error GoTo TestFail
+    xlApp.DisplayAlerts = True
+
+    Call df3D.ToMultiSheets("Quarter", ThisWorkbook, "MINIMAL")
+    Dim wsQ1 As Object, wsQ2 As Object
+    On Error Resume Next
+    Set wsQ1 = ThisWorkbook.Worksheets("Q1")
+    Set wsQ2 = ThisWorkbook.Worksheets("Q2")
+    On Error GoTo TestFail
+    AssertFalse wsQ1 Is Nothing, "ToMultiSheets created Q1 worksheet"
+    AssertFalse wsQ2 Is Nothing, "ToMultiSheets created Q2 worksheet"
+
+    LogPrint "  [48.4] LoadFromSheets..."
+    Dim dfFromSheets As New cDataFrame
+    Call dfFromSheets.LoadFromSheets(Array("Q1", "Q2"), ThisWorkbook, True, True, "OriginSheet")
+    AssertEqual dfFromSheets.RowCount, 4, "LoadFromSheets combined row count is 4"
+    AssertTrue dfFromSheets.HasColumn("OriginSheet"), "LoadFromSheets added OriginSheet column"
+
+    xlApp.DisplayAlerts = False
+    On Error Resume Next
+    ThisWorkbook.Worksheets("Q1").Delete
+    ThisWorkbook.Worksheets("Q2").Delete
+    On Error GoTo 0
+    xlApp.DisplayAlerts = True
+    Exit Sub
+
+TestFail:
+    Dim failErr As String
+    failErr = Err.Description
+    On Error Resume Next
+    ThisWorkbook.Application.DisplayAlerts = False
+    ThisWorkbook.Worksheets("Q1").Delete
+    ThisWorkbook.Worksheets("Q2").Delete
+    ThisWorkbook.Application.DisplayAlerts = True
+    On Error GoTo 0
+    RecordFailure "Test_3DArrayAndMultiSheets", failErr
 End Sub
 
 Private Sub SafeDeleteName(ByVal AnchorName As String)

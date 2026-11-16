@@ -6415,3 +6415,378 @@ Public Function Explode(ByVal ColumnKey As Variant, _
 
     Set Explode = res
 End Function
+
+
+' ==============================================================================
+' 3D Array & Multi-Sheet Operations
+' ==============================================================================
+
+' Helper: Sanitizes worksheet names by removing illegal characters (: \ / ? * [ ]) and truncating to 31 chars.
+Private Function CleanSheetName(ByVal RawName As String) As String
+    Dim s As String
+    s = Trim$(RawName)
+    Dim badChars As Variant
+    badChars = Array(":", "\", "/", "?", "*", "[", "]")
+    Dim b As Long
+    For b = LBound(badChars) To UBound(badChars)
+        s = Replace(s, badChars(b), "_")
+    Next b
+    If Len(s) = 0 Then s = "Sheet"
+    If Len(s) > 31 Then s = Left$(s, 31)
+    CleanSheetName = s
+End Function
+
+' Unrolls a 3D Variant Array (Row, Col, Layer) into a 2D DataFrame with a Layer column.
+Public Function LoadFrom3DArray(ByRef Data3D As Variant, _
+                                Optional ByVal HasHeaders As Boolean = True, _
+                                Optional ByVal LayerNames As Variant, _
+                                Optional ByVal LayerColumnName As String = "Sheet") As cDataFrame
+    Dim a As Variant
+    a = Data3D
+    If Not IsArray(a) Then
+        Err.Raise 5, "cDataFrame.LoadFrom3DArray", "Data3D must be a 3D array."
+    End If
+
+    Dim lb1 As Long, ub1 As Long, lb2 As Long, ub2 As Long, lb3 As Long, ub3 As Long
+    On Error Resume Next
+    lb1 = LBound(a, 1): ub1 = UBound(a, 1)
+    lb2 = LBound(a, 2): ub2 = UBound(a, 2)
+    lb3 = LBound(a, 3): ub3 = UBound(a, 3)
+    If Err.Number <> 0 Then
+        Err.Clear
+        On Error GoTo 0
+        Err.Raise 5, "cDataFrame.LoadFrom3DArray", "Data3D must have 3 dimensions."
+    End If
+    On Error GoTo 0
+
+    Dim nRowsPerLayer As Long, nCols As Long, nLayers As Long
+    nCols = ub2 - lb2 + 1
+    nLayers = ub3 - lb3 + 1
+
+    If HasHeaders Then
+        nRowsPerLayer = ub1 - lb1
+    Else
+        nRowsPerLayer = ub1 - lb1 + 1
+    End If
+
+    If nRowsPerLayer < 0 Then nRowsPerLayer = 0
+    Dim totalDataRows As Long
+    totalDataRows = nRowsPerLayer * nLayers
+
+    Dim total2DCols As Long
+    total2DCols = nCols + 1
+
+    Dim arr2D() As Variant
+    ReDim arr2D(1 To totalDataRows + 1, 1 To total2DCols)
+
+    ' Row 1: Headers
+    arr2D(1, 1) = LayerColumnName
+    Dim c As Long, r As Long, l As Long
+    For c = 1 To nCols
+        If HasHeaders Then
+            arr2D(1, c + 1) = CStr(a(lb1, lb2 + c - 1, lb3))
+        Else
+            arr2D(1, c + 1) = "Col" & c
+        End If
+    Next c
+
+    ' Rows 2..N: Data
+    Dim outRow As Long
+    outRow = 1
+    Dim curLayerName As String
+    Dim hasCustomLayers As Boolean
+    hasCustomLayers = IsArray(LayerNames)
+
+    For l = lb3 To ub3
+        If hasCustomLayers Then
+            Dim lIdx As Long
+            lIdx = LBound(LayerNames) + (l - lb3)
+            If lIdx <= UBound(LayerNames) Then
+                curLayerName = CStr(LayerNames(lIdx))
+            Else
+                curLayerName = "Layer" & (l - lb3 + 1)
+            End If
+        Else
+            curLayerName = "Layer" & (l - lb3 + 1)
+        End If
+
+        Dim startR As Long
+        If HasHeaders Then
+            startR = lb1 + 1
+        Else
+            startR = lb1
+        End If
+
+        For r = startR To ub1
+            outRow = outRow + 1
+            arr2D(outRow, 1) = curLayerName
+            For c = lb2 To ub2
+                arr2D(outRow, c - lb2 + 2) = a(r, c, l)
+            Next c
+        Next r
+    Next l
+
+    Set LoadFrom3DArray = LoadFromVariant2D(arr2D, True)
+End Function
+
+' Partitions the DataFrame by LayerColumnKey into a 3D Variant Array (Row, Col, Layer).
+Public Function To3DArray(ByVal LayerColumnKey As Variant, _
+                          Optional ByVal IncludeHeaders As Boolean = False) As Variant
+    If mRowCount = 0 Or mCols.Count = 0 Then
+        To3DArray = Array()
+        Exit Function
+    End If
+
+    Dim layerColName As String
+    layerColName = ResolveColName(LayerColumnKey)
+
+    Dim layerCol As cColumn
+    Set layerCol = mCols.Item(layerColName)
+
+    Dim otherCols As New Collection
+    Dim k As Variant, cName As String
+    For Each k In mCols.Keys
+        cName = CStr(k)
+        If StrComp(cName, layerColName, vbTextCompare) <> 0 Then
+            otherCols.Add cName
+        End If
+    Next k
+
+    Dim numOtherCols As Long
+    numOtherCols = otherCols.Count
+    If numOtherCols = 0 Then
+        To3DArray = Array()
+        Exit Function
+    End If
+
+    Dim layerMap As Object
+    Set layerMap = CreateObject("Scripting.Dictionary")
+    layerMap.CompareMode = IIf(mCaseSensitive, 0, 1)
+
+    Dim r As Long
+    Dim lKey As String
+    Dim rowList As Collection
+
+    For r = 1 To mRowCount
+        lKey = SafeKeyString(layerCol.Item(r))
+        If Not layerMap.Exists(lKey) Then
+            Set rowList = New Collection
+            layerMap.Add lKey, rowList
+        Else
+            Set rowList = layerMap.Item(lKey)
+        End If
+        rowList.Add r
+    Next r
+
+    Dim numLayers As Long
+    numLayers = layerMap.Count
+    If numLayers = 0 Then
+        To3DArray = Array()
+        Exit Function
+    End If
+
+    Dim maxRows As Long
+    maxRows = 0
+    Dim lIdx As Long
+    Dim dictKeys As Variant
+    dictKeys = layerMap.Keys
+    For lIdx = 0 To numLayers - 1
+        Set rowList = layerMap.Item(dictKeys(lIdx))
+        If rowList.Count > maxRows Then
+            maxRows = rowList.Count
+        End If
+    Next lIdx
+
+    Dim totalRows As Long
+    totalRows = maxRows + IIf(IncludeHeaders, 1, 0)
+    If totalRows = 0 Then
+        To3DArray = Array()
+        Exit Function
+    End If
+
+    Dim otherColObjs() As cColumn
+    ReDim otherColObjs(1 To numOtherCols)
+    Dim c As Long
+    For c = 1 To numOtherCols
+        Set otherColObjs(c) = mCols.Item(otherCols(c))
+    Next c
+
+    Dim res() As Variant
+    ReDim res(1 To totalRows, 1 To numOtherCols, 1 To numLayers)
+
+    Dim l As Long, rowIdx As Long, targetRow As Long
+    For l = 1 To numLayers
+        If IncludeHeaders Then
+            For c = 1 To numOtherCols
+                res(1, c, l) = otherCols(c)
+            Next c
+        End If
+
+        Set rowList = layerMap.Item(dictKeys(l - 1))
+        For rowIdx = 1 To rowList.Count
+            targetRow = rowIdx + IIf(IncludeHeaders, 1, 0)
+            r = rowList.Item(rowIdx)
+            For c = 1 To numOtherCols
+                res(targetRow, c, l) = otherColObjs(c).Item(r)
+            Next c
+        Next rowIdx
+    Next l
+
+    To3DArray = res
+End Function
+
+' Partitions the DataFrame by SplitColumnKey and exports each group to its own worksheet.
+Public Function ToMultiSheets(ByVal SplitColumnKey As Variant, _
+                              Optional ByVal TargetWorkbook As Object, _
+                              Optional ByVal ThemeName As String = "NAVY", _
+                              Optional ByVal AutoFit As Boolean = True, _
+                              Optional ByVal ClearExistingSheets As Boolean = False) As cDataFrame
+    Dim wb As Object
+    If TargetWorkbook Is Nothing Then
+        Set wb = Application.ActiveWorkbook
+    Else
+        Set wb = TargetWorkbook
+    End If
+
+    If wb Is Nothing Then
+        Err.Raise 91, "cDataFrame.ToMultiSheets", "TargetWorkbook is Nothing and no ActiveWorkbook found."
+    End If
+
+    Dim splitColName As String
+    splitColName = ResolveColName(SplitColumnKey)
+
+    Dim groups As Object
+    Set groups = Me.SplitBy(splitColName)
+
+    Dim groupKeys As Variant
+    groupKeys = groups.Keys
+
+    Dim i As Long
+    Dim sheetName As String
+    Dim ws As Object
+    Dim subDf As cDataFrame
+
+    For i = 0 To groups.Count - 1
+        sheetName = CleanSheetName(CStr(groupKeys(i)))
+
+        Set ws = Nothing
+        On Error Resume Next
+        Set ws = wb.Worksheets(sheetName)
+        On Error GoTo 0
+
+        If ws Is Nothing Then
+            Set ws = wb.Worksheets.Add(After:=wb.Worksheets(wb.Worksheets.Count))
+            ws.Name = sheetName
+        ElseIf ClearExistingSheets Then
+            ws.Cells.Clear
+        End If
+
+        Set subDf = groups.Item(groupKeys(i))
+        If Not subDf Is Nothing Then
+            If Len(Trim$(ThemeName)) > 0 And UCase$(Trim$(ThemeName)) <> "NONE" Then
+                subDf.ToStyledRange ws.Range("A1"), ThemeName, True
+            Else
+                subDf.ToRange ws.Range("A1"), True
+            End If
+
+            If AutoFit Then
+                On Error Resume Next
+                ws.UsedRange.Columns.AutoFit
+                On Error GoTo 0
+            End If
+        End If
+    Next i
+
+    Set ToMultiSheets = Me
+End Function
+
+' Ingests and unions multiple worksheets matching name pattern or array from target workbook.
+Public Function LoadFromSheets(Optional ByVal SheetPatternOrNames As Variant = "*", _
+                               Optional ByVal TargetWorkbook As Object, _
+                               Optional ByVal HasHeaders As Boolean = True, _
+                               Optional ByVal AddSheetColumn As Boolean = True, _
+                               Optional ByVal SheetColumnName As String = "SheetName", _
+                               Optional ByVal ExcludeSheets As Variant) As cDataFrame
+    Dim wb As Object
+    If TargetWorkbook Is Nothing Then
+        Set wb = Application.ActiveWorkbook
+    Else
+        Set wb = TargetWorkbook
+    End If
+
+    If wb Is Nothing Then
+        Err.Raise 91, "cDataFrame.LoadFromSheets", "TargetWorkbook is Nothing and no ActiveWorkbook found."
+    End If
+
+    mCols.RemoveAll
+    mRowCount = 0
+    Set mRowIndexMap = Nothing
+    mIndexColumnName = ""
+    mIndexDirty = False
+
+    Dim ws As Object
+    Dim matchThis As Boolean
+    Dim excludeThis As Boolean
+    Dim usedRng As Object
+    Dim tmpDf As cDataFrame
+    Dim sheetName As String
+
+    For Each ws In wb.Worksheets
+        sheetName = ws.Name
+        excludeThis = False
+        If Not IsMissing(ExcludeSheets) And Not IsEmpty(ExcludeSheets) Then
+            If IsArray(ExcludeSheets) Then
+                Dim exIdx As Long
+                For exIdx = LBound(ExcludeSheets) To UBound(ExcludeSheets)
+                    If StrComp(sheetName, CStr(ExcludeSheets(exIdx)), vbTextCompare) = 0 Or sheetName Like CStr(ExcludeSheets(exIdx)) Then
+                        excludeThis = True
+                        Exit For
+                    End If
+                Next exIdx
+            Else
+                If StrComp(sheetName, CStr(ExcludeSheets), vbTextCompare) = 0 Or sheetName Like CStr(ExcludeSheets) Then
+                    excludeThis = True
+                End If
+            End If
+        End If
+
+        If Not excludeThis Then
+            matchThis = False
+            If IsArray(SheetPatternOrNames) Then
+                Dim pIdx As Long
+                For pIdx = LBound(SheetPatternOrNames) To UBound(SheetPatternOrNames)
+                    If StrComp(sheetName, CStr(SheetPatternOrNames(pIdx)), vbTextCompare) = 0 Or sheetName Like CStr(SheetPatternOrNames(pIdx)) Then
+                        matchThis = True
+                        Exit For
+                    End If
+                Next pIdx
+            Else
+                Dim patternStr As String
+                patternStr = CStr(SheetPatternOrNames)
+                If Len(patternStr) = 0 Or patternStr = "*" Then
+                    matchThis = True
+                ElseIf sheetName Like patternStr Or StrComp(sheetName, patternStr, vbTextCompare) = 0 Then
+                    matchThis = True
+                End If
+            End If
+
+            If matchThis Then
+                Set usedRng = ws.UsedRange
+                If Not usedRng Is Nothing Then
+                    If Not (usedRng.Rows.Count = 1 And usedRng.Columns.Count = 1 And IsEmpty(usedRng.Cells(1, 1).Value)) Then
+                        Set tmpDf = New cDataFrame
+                        tmpDf.LoadFromRange usedRng, HasHeaders
+                        If tmpDf.ColumnCount > 0 And tmpDf.RowCount > 0 Then
+                            If AddSheetColumn Then
+                                AddConstantColumnToDF tmpDf, SheetColumnName, sheetName
+                            End If
+                            AppendDataFrameRows tmpDf
+                        End If
+                    End If
+                End If
+            End If
+        End If
+    Next ws
+
+    Set LoadFromSheets = Me
+End Function

@@ -31,6 +31,8 @@
 | `LoadFromListObject(TableObj)` | `Function As cDataFrame` | ดึงข้อมูลจาก Excel Table (`ListObject`) |
 | `LoadFromCSV(FilePath, [Delimiter], [HasHeaders], [AutoInferNumeric])` | `Function As cDataFrame` | อ่านไฟล์ CSV มาตรฐาน RFC 4180 |
 | `LoadFromJSON(JsonString)` | `Function As cDataFrame` | แปลง JSON String (`RECORDS` หรือ `SPLIT`) เข้า DataFrame |
+| `LoadFrom3DArray(Data3D, [HasHeaders], [LayerNames], [LayerColumnName])` | `Function As cDataFrame` | คลี่ 3D Variant Array `(Row, Col, Layer)` เป็นตาราง 2D พร้อมระบุคอลัมน์ Layer (เช่น Quarter/Sheet) |
+| `LoadFromSheets([SheetPatternOrNames], [TargetWorkbook], [HasHeaders], [AddSheetColumn], [SheetColumnName], [ExcludeSheets])` | `Function As cDataFrame` | โหลดและรวมตารางจากหลาย Worksheet ตามชื่อหรือ wildcard (เช่น `Array("Q1", "Q2")` หรือ `"Data_*"`) |
 
 ```vba
 Dim df As New cDataFrame
@@ -127,6 +129,8 @@ Set dfSkills = df.Explode("skills", ",")
 | `ToCSV(FilePath, [Delimiter], [IncludeHeaders], [SanitizeFormulas])` | `Sub` | เซฟเป็นไฟล์ CSV พร้อมป้องกัน Formula Injection |
 | `ToJSON([Orient="RECORDS"])` | `Function As String` | แปลงเป็น JSON String |
 | `ToMarkdown([MaxRows])` / `ToHTML([TableClass])` | `Function As String` | แปลงเป็นตาราง Markdown หรือ HTML |
+| `To3DArray(LayerColumnKey, [IncludeHeaders])` | `Function As Variant` | แยกกลุ่ม DataFrame ตาม LayerColumnKey ออกมาเป็น 3D Variant Array `(Row, Col, Layer)` |
+| `ToMultiSheets(SplitColumnKey, [TargetWorkbook], [ThemeName], [AutoFit], [ClearExistingSheets])` | `Function As cDataFrame` | แยกกลุ่ม DataFrame ตาม SplitColumnKey แล้วส่งออกแต่ละกลุ่มลง Worksheet แยกเฉพาะแผ่นพร้อมตกแต่งสไตล์ |
 
 ---
 
