@@ -2256,6 +2256,435 @@ Public Function StrLen(Optional ByVal ResultName As String = "") As cColumn
 End Function
 
 ' ------------------------------------------------------------------------------
+' Clean & Transform Data Operations (StrClean, NormalizeWhitespace, Cast,
+' CoerceNumeric, CoerceDate, ExtractRegex, ReplaceRegex, MapValues, BinColumn)
+' ------------------------------------------------------------------------------
+
+' Removes ASCII control characters (Chr(0)..Chr(31), Chr(127)) and replaces non-breaking space (Chr(160)/ChrW(160)) with regular space.
+Public Function StrClean(Optional ByVal ResultName As String = "") As cColumn
+    Dim res As New cColumn
+    res.Name = IIf(Len(Trim$(ResultName)) > 0, Trim$(ResultName), mName)
+    If mCount = 0 Then
+        Set StrClean = res
+        Exit Function
+    End If
+
+    res.EnsureCapacity mCount
+    res.SetCount mCount
+
+    Dim i As Long, v As Variant, s As String, chCode As Long, j As Long, ch As String
+    Dim sb As String
+    For i = 1 To mCount
+        v = mData(i)
+        If IsError(v) Or IsEmpty(v) Or IsNull(v) Then
+            res.Item(i) = v
+        Else
+            s = CStr(v)
+            s = Replace(s, ChrW$(160), " ")
+            sb = ""
+            For j = 1 To Len(s)
+                ch = Mid$(s, j, 1)
+                chCode = AscW(ch)
+                If (chCode >= 32 And chCode <> 127) Or chCode > 255 Or chCode < 0 Then
+                    sb = sb & ch
+                End If
+            Next j
+            res.Item(i) = Trim$(sb)
+        End If
+    Next i
+
+    Set StrClean = res
+End Function
+
+' Replaces tabs, linebreaks, non-breaking spaces with standard space, collapses multiple spaces into one, and trims.
+Public Function NormalizeWhitespace(Optional ByVal ResultName As String = "") As cColumn
+    Dim res As New cColumn
+    res.Name = IIf(Len(Trim$(ResultName)) > 0, Trim$(ResultName), mName)
+    If mCount = 0 Then
+        Set NormalizeWhitespace = res
+        Exit Function
+    End If
+
+    res.EnsureCapacity mCount
+    res.SetCount mCount
+
+    Dim i As Long, v As Variant, s As String, j As Long, ch As String, chCode As Long, sb As String
+    For i = 1 To mCount
+        v = mData(i)
+        If IsError(v) Or IsEmpty(v) Or IsNull(v) Then
+            res.Item(i) = v
+        Else
+            s = CStr(v)
+            s = Replace(s, ChrW$(160), " ")
+            sb = ""
+            For j = 1 To Len(s)
+                ch = Mid$(s, j, 1)
+                chCode = AscW(ch)
+                If (chCode >= 0 And chCode < 32) Or chCode = 127 Then
+                    sb = sb & " "
+                Else
+                    sb = sb & ch
+                End If
+            Next j
+            s = sb
+            Do While InStr(s, "  ") > 0
+                s = Replace(s, "  ", " ")
+            Loop
+            res.Item(i) = Trim$(s)
+        End If
+    Next i
+
+    Set NormalizeWhitespace = res
+End Function
+
+' Casts column elements to target data type: STRING, LONG, DOUBLE, DATE, BOOLEAN.
+Public Function Cast(ByVal TargetType As String, Optional ByVal ResultName As String = "") As cColumn
+    Dim res As New cColumn
+    res.Name = IIf(Len(Trim$(ResultName)) > 0, Trim$(ResultName), mName)
+    If mCount = 0 Then
+        Set Cast = res
+        Exit Function
+    End If
+
+    res.EnsureCapacity mCount
+    res.SetCount mCount
+
+    Dim tType As String
+    tType = UCase$(Trim$(TargetType))
+
+    Dim i As Long, v As Variant
+    For i = 1 To mCount
+        v = mData(i)
+        If IsEmpty(v) Or IsNull(v) Then
+            res.Item(i) = Empty
+        ElseIf IsError(v) Then
+            res.Item(i) = v
+        Else
+            On Error Resume Next
+            Select Case tType
+                Case "STRING", "STR", "TEXT"
+                    res.Item(i) = CStr(v)
+                Case "LONG", "INT", "INTEGER"
+                    res.Item(i) = CLng(v)
+                Case "DOUBLE", "FLOAT", "NUMERIC", "NUMBER"
+                    res.Item(i) = CDbl(v)
+                Case "DATE", "DATETIME"
+                    res.Item(i) = CDate(v)
+                Case "BOOLEAN", "BOOL"
+                    res.Item(i) = CBool(v)
+                Case Else
+                    res.Item(i) = v
+            End Select
+            If Err.Number <> 0 Then
+                Err.Clear
+                res.Item(i) = CVErr(2015) ' #VALUE!
+            End If
+            On Error GoTo 0
+        End If
+    Next i
+
+    Set Cast = res
+End Function
+
+' Converts dirty numeric strings (with commas, currency signs $, THB, spaces, % or parens) to Double.
+Public Function CoerceNumeric(Optional ByVal ResultName As String = "", _
+                              Optional ByVal DefaultVal As Variant = 0#) As cColumn
+    Dim res As New cColumn
+    res.Name = IIf(Len(Trim$(ResultName)) > 0, Trim$(ResultName), mName)
+    If mCount = 0 Then
+        Set CoerceNumeric = res
+        Exit Function
+    End If
+
+    res.EnsureCapacity mCount
+    res.SetCount mCount
+
+    Dim i As Long, v As Variant, s As String, isNegative As Boolean, isPct As Boolean
+    Dim dVal As Double, j As Long, ch As String, cleanStr As String
+    For i = 1 To mCount
+        v = mData(i)
+        If IsEmpty(v) Or IsNull(v) Or IsError(v) Then
+            res.Item(i) = DefaultVal
+        ElseIf IsNumeric(v) Then
+            res.Item(i) = CDbl(v)
+        Else
+            s = Trim$(CStr(v))
+            If Len(s) = 0 Then
+                res.Item(i) = DefaultVal
+            Else
+                isNegative = False
+                isPct = False
+                If Left$(s, 1) = "(" And Right$(s, 1) = ")" Then
+                    isNegative = True
+                    s = Mid$(s, 2, Len(s) - 2)
+                End If
+                If Right$(s, 1) = "%" Then
+                    isPct = True
+                    s = Left$(s, Len(s) - 1)
+                End If
+                cleanStr = ""
+                For j = 1 To Len(s)
+                    ch = Mid$(s, j, 1)
+                    If (ch >= "0" And ch <= "9") Or ch = "." Or ch = "-" Then
+                        cleanStr = cleanStr & ch
+                    End If
+                Next j
+                If IsNumeric(cleanStr) Then
+                    dVal = CDbl(cleanStr)
+                    If isNegative Then dVal = -dVal
+                    If isPct Then dVal = dVal / 100#
+                    res.Item(i) = dVal
+                Else
+                    res.Item(i) = DefaultVal
+                End If
+            End If
+        End If
+    Next i
+
+    Set CoerceNumeric = res
+End Function
+
+' Parses date strings/serials into Date variants.
+Public Function CoerceDate(Optional ByVal ResultName As String = "", _
+                           Optional ByVal DefaultVal As Variant) As cColumn
+    Dim res As New cColumn
+    res.Name = IIf(Len(Trim$(ResultName)) > 0, Trim$(ResultName), mName)
+    If mCount = 0 Then
+        Set CoerceDate = res
+        Exit Function
+    End If
+
+    Dim defV As Variant
+    If IsMissing(DefaultVal) Then
+        defV = Empty
+    Else
+        defV = DefaultVal
+    End If
+
+    res.EnsureCapacity mCount
+    res.SetCount mCount
+
+    Dim i As Long, v As Variant, dt As Date, s As String
+    For i = 1 To mCount
+        v = mData(i)
+        If IsEmpty(v) Or IsNull(v) Or IsError(v) Then
+            res.Item(i) = defV
+        ElseIf VarType(v) = vbDate Then
+            res.Item(i) = CDate(v)
+        ElseIf IsNumeric(v) Then
+            If CDbl(v) >= 1# And CDbl(v) <= 2958465# Then
+                res.Item(i) = CDate(CDbl(v))
+            Else
+                res.Item(i) = defV
+            End If
+        Else
+            s = Trim$(CStr(v))
+            ' Check ISO YYYY-MM-DD or YYYY/MM/DD
+            If Len(s) >= 10 And (Mid$(s, 5, 1) = "-" Or Mid$(s, 5, 1) = "/") Then
+                On Error Resume Next
+                dt = DateSerial(CLng(Left$(s, 4)), CLng(Mid$(s, 6, 2)), CLng(Mid$(s, 9, 2)))
+                If Err.Number = 0 Then
+                    res.Item(i) = dt
+                Else
+                    Err.Clear
+                    If IsDate(s) Then res.Item(i) = CDate(s) Else res.Item(i) = defV
+                End If
+                On Error GoTo 0
+            ElseIf IsDate(s) Then
+                res.Item(i) = CDate(s)
+            Else
+                res.Item(i) = defV
+            End If
+        End If
+    Next i
+
+    Set CoerceDate = res
+End Function
+
+' Extracts regex pattern match or capture group using VBScript.RegExp.
+Public Function ExtractRegex(ByVal Pattern As String, _
+                             Optional ByVal GroupIndex As Long = 0, _
+                             Optional ByVal ResultName As String = "") As cColumn
+    Dim res As New cColumn
+    res.Name = IIf(Len(Trim$(ResultName)) > 0, Trim$(ResultName), mName & "_Extracted")
+    If mCount = 0 Then
+        Set ExtractRegex = res
+        Exit Function
+    End If
+
+    res.EnsureCapacity mCount
+    res.SetCount mCount
+
+    Dim reg As Object
+    Set reg = CreateObject("VBScript.RegExp")
+    reg.Global = False
+    reg.IgnoreCase = True
+    reg.Pattern = Pattern
+
+    Dim i As Long, v As Variant, matches As Object, m As Object
+    For i = 1 To mCount
+        v = mData(i)
+        If IsEmpty(v) Or IsNull(v) Or IsError(v) Then
+            res.Item(i) = ""
+        Else
+            Set matches = reg.Execute(CStr(v))
+            If matches.Count > 0 Then
+                Set m = matches(0)
+                If GroupIndex = 0 Then
+                    res.Item(i) = m.Value
+                ElseIf GroupIndex <= m.SubMatches.Count Then
+                    res.Item(i) = m.SubMatches(GroupIndex - 1)
+                Else
+                    res.Item(i) = ""
+                End If
+            Else
+                res.Item(i) = ""
+            End If
+        End If
+    Next i
+
+    Set ExtractRegex = res
+End Function
+
+' Replaces all occurrences matching regex Pattern with Replacement string.
+Public Function ReplaceRegex(ByVal Pattern As String, _
+                             ByVal Replacement As String, _
+                             Optional ByVal ResultName As String = "") As cColumn
+    Dim res As New cColumn
+    res.Name = IIf(Len(Trim$(ResultName)) > 0, Trim$(ResultName), mName)
+    If mCount = 0 Then
+        Set ReplaceRegex = res
+        Exit Function
+    End If
+
+    res.EnsureCapacity mCount
+    res.SetCount mCount
+
+    Dim reg As Object
+    Set reg = CreateObject("VBScript.RegExp")
+    reg.Global = True
+    reg.IgnoreCase = True
+    reg.Pattern = Pattern
+
+    Dim i As Long, v As Variant
+    For i = 1 To mCount
+        v = mData(i)
+        If IsEmpty(v) Or IsNull(v) Or IsError(v) Then
+            res.Item(i) = v
+        Else
+            res.Item(i) = reg.Replace(CStr(v), Replacement)
+        End If
+    Next i
+
+    Set ReplaceRegex = res
+End Function
+
+' Replaces values using a dictionary mapping (Dictionary or 2D Array). If key not found, uses DefaultVal (if provided) or keeps original.
+Public Function MapValues(ByVal MappingDictOrArray As Variant, _
+                          Optional ByVal DefaultVal As Variant, _
+                          Optional ByVal ResultName As String = "") As cColumn
+    Dim res As New cColumn
+    res.Name = IIf(Len(Trim$(ResultName)) > 0, Trim$(ResultName), mName)
+    If mCount = 0 Then
+        Set MapValues = res
+        Exit Function
+    End If
+
+    res.EnsureCapacity mCount
+    res.SetCount mCount
+
+    Dim hasDef As Boolean
+    hasDef = Not IsMissing(DefaultVal)
+    If hasDef Then
+        If IsEmpty(DefaultVal) Then hasDef = False
+    End If
+
+    Dim dict As Object
+    If IsObject(MappingDictOrArray) Then
+        Set dict = MappingDictOrArray
+    ElseIf IsArray(MappingDictOrArray) Then
+        Set dict = CreateObject("Scripting.Dictionary")
+        dict.CompareMode = 1 ' TextCompare
+        Dim r As Long
+        For r = LBound(MappingDictOrArray, 1) To UBound(MappingDictOrArray, 1)
+            dict(MappingDictOrArray(r, LBound(MappingDictOrArray, 2))) = _
+                MappingDictOrArray(r, LBound(MappingDictOrArray, 2) + 1)
+        Next r
+    Else
+        Err.Raise 5, "cColumn.MapValues", "Mapping must be a Dictionary or 2D Array."
+    End If
+
+    Dim i As Long, v As Variant, keyStr As String
+    For i = 1 To mCount
+        v = mData(i)
+        If IsEmpty(v) Or IsNull(v) Or IsError(v) Then
+            If hasDef Then res.Item(i) = DefaultVal Else res.Item(i) = v
+        Else
+            keyStr = CStr(v)
+            If dict.Exists(v) Then
+                res.Item(i) = dict.Item(v)
+            ElseIf dict.Exists(keyStr) Then
+                res.Item(i) = dict.Item(keyStr)
+            ElseIf hasDef Then
+                res.Item(i) = DefaultVal
+            Else
+                res.Item(i) = v
+            End If
+        End If
+    Next i
+
+    Set MapValues = res
+End Function
+
+' Groups numeric column values into bins given Cutoffs array (ascending) and Labels array.
+' E.g. Cutoffs = Array(50, 80), Labels = Array("Low", "Mid", "High")
+Public Function BinColumn(ByVal Cutoffs As Variant, _
+                          ByVal Labels As Variant, _
+                          Optional ByVal ResultName As String = "") As cColumn
+    Dim res As New cColumn
+    res.Name = IIf(Len(Trim$(ResultName)) > 0, Trim$(ResultName), mName & "_Binned")
+    If mCount = 0 Then
+        Set BinColumn = res
+        Exit Function
+    End If
+
+    If Not IsArray(Cutoffs) Or Not IsArray(Labels) Then
+        Err.Raise 5, "cColumn.BinColumn", "Cutoffs and Labels must be arrays."
+    End If
+
+    Dim cLb As Long, cUb As Long, lLb As Long, lUb As Long
+    cLb = LBound(Cutoffs): cUb = UBound(Cutoffs)
+    lLb = LBound(Labels):  lUb = UBound(Labels)
+
+    If (lUb - lLb + 1) <> (cUb - cLb + 2) Then
+        Err.Raise 5, "cColumn.BinColumn", "Labels count must be Cutoffs count + 1."
+    End If
+
+    res.EnsureCapacity mCount
+    res.SetCount mCount
+
+    Dim i As Long, v As Variant, numVal As Double, b As Long, assignedLabel As Variant
+    For i = 1 To mCount
+        v = mData(i)
+        If IsEmpty(v) Or IsNull(v) Or IsError(v) Or Not IsNumeric(v) Then
+            res.Item(i) = Empty
+        Else
+            numVal = CDbl(v)
+            assignedLabel = Labels(lUb) ' default to highest bin
+            For b = cLb To cUb
+                If numVal < CDbl(Cutoffs(b)) Then
+                    assignedLabel = Labels(lLb + (b - cLb))
+                    Exit For
+                End If
+            Next b
+            res.Item(i) = assignedLabel
+        End If
+    Next i
+
+    Set BinColumn = res
+End Function
+
+' ------------------------------------------------------------------------------
 ' Cloning
 ' ------------------------------------------------------------------------------
 

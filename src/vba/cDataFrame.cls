@@ -5930,3 +5930,488 @@ Private Sub AppendDataFrameRows(ByVal srcDf As cDataFrame)
     Next k
     mIndexDirty = True
 End Sub
+
+' =============================================================================
+' CLEAN DATA & TRANSFORM DATA OPERATIONS
+' =============================================================================
+
+' Cleans all column names (removes control chars, trims, optional lowercase and underscore replacement, dedup).
+Public Function CleanHeaders(Optional ByVal ConvertToLower As Boolean = False, _
+                             Optional ByVal ReplaceSpacesWithUnderscores As Boolean = False) As cDataFrame
+    If mCols.Count = 0 Then
+        Set CleanHeaders = Me
+        Exit Function
+    End If
+
+    Dim keys As Variant, oldKey As String, newKey As String
+    Dim c As Long, j As Long, ch As String, chCode As Long, sb As String
+    Dim tempDict As Object, uniqueKey As String, dupCount As Long, uKey As Variant
+    Set tempDict = CreateObject("Scripting.Dictionary")
+    tempDict.CompareMode = 1
+
+    keys = mCols.Keys
+    For c = 0 To mCols.Count - 1
+        oldKey = CStr(keys(c))
+        oldKey = Replace(oldKey, vbCrLf, " ")
+        oldKey = Replace(oldKey, vbCr, " ")
+        oldKey = Replace(oldKey, vbLf, " ")
+        oldKey = Replace(oldKey, vbTab, " ")
+        oldKey = Replace(oldKey, ChrW$(160), " ")
+        sb = ""
+        For j = 1 To Len(oldKey)
+            ch = Mid$(oldKey, j, 1)
+            chCode = AscW(ch)
+            If (chCode >= 32 And chCode <> 127) Or chCode > 255 Or chCode < 0 Then
+                sb = sb & ch
+            End If
+        Next j
+        newKey = Trim$(sb)
+        Do While InStr(newKey, "  ") > 0
+            newKey = Replace(newKey, "  ", " ")
+        Loop
+        If ReplaceSpacesWithUnderscores Then
+            newKey = Replace(newKey, " ", "_")
+            Do While InStr(newKey, "__") > 0
+                newKey = Replace(newKey, "__", "_")
+            Loop
+        End If
+        If ConvertToLower Then
+            newKey = LCase$(newKey)
+        End If
+        If Len(newKey) = 0 Then
+            newKey = "Column_" & (c + 1)
+        End If
+
+        uniqueKey = newKey
+        dupCount = 1
+        Do While tempDict.Exists(uniqueKey)
+            dupCount = dupCount + 1
+            uniqueKey = newKey & "_" & dupCount
+        Loop
+        tempDict.Add uniqueKey, mCols.Item(CStr(keys(c)))
+    Next c
+
+    For Each uKey In tempDict.Keys
+        tempDict.Item(uKey).Name = CStr(uKey)
+    Next uKey
+
+    Set mCols = tempDict
+    SyncColList
+    mIndexDirty = True
+
+    Set CleanHeaders = Me
+End Function
+
+' Drops rows where all values (or all subset column values) are empty, blank, or null.
+Public Function DropEmptyRows(Optional ByVal SubsetColumns As Variant) As cDataFrame
+    Set DropEmptyRows = DropNA(SubsetColumns, "ALL", True)
+End Function
+
+' Drops columns where all values are empty, blank, or null.
+Public Function DropEmptyColumns() As cDataFrame
+    Dim res As New cDataFrame
+    If mCols.Count = 0 Or mRowCount = 0 Then
+        Set DropEmptyColumns = Clone()
+        Exit Function
+    End If
+
+    Dim colKey As Variant, col As cColumn, r As Long, isEmptyCol As Boolean, v As Variant
+    Dim keepCols As New Collection
+    For Each colKey In mCols.Keys
+        Set col = mCols.Item(colKey)
+        isEmptyCol = True
+        For r = 1 To mRowCount
+            v = col.Item(r)
+            If Not (IsEmpty(v) Or IsNull(v) Or IsError(v)) Then
+                If Len(Trim$(CStr(v))) > 0 Then
+                    isEmptyCol = False
+                    Exit For
+                End If
+            End If
+        Next r
+        If Not isEmptyCol Then
+            keepCols.Add CStr(colKey)
+        End If
+    Next colKey
+
+    If keepCols.Count = 0 Then
+        Set DropEmptyColumns = res
+        Exit Function
+    End If
+
+    Dim colArr() As String
+    ReDim colArr(1 To keepCols.Count)
+    Dim i As Long
+    For i = 1 To keepCols.Count
+        colArr(i) = keepCols(i)
+    Next i
+
+    Set DropEmptyColumns = SelectColumns(colArr)
+End Function
+
+' Promotes the row at RowIndex to column headers and discards rows 1..RowIndex.
+Public Function PromoteHeaders(Optional ByVal RowIndex As Long = 1, _
+                               Optional ByVal CleanNames As Boolean = True) As cDataFrame
+    If RowIndex < 1 Or RowIndex > mRowCount Then
+        Err.Raise 9, "cDataFrame.PromoteHeaders", "RowIndex out of range."
+    End If
+
+    Dim newCols As Object
+    Set newCols = CreateObject("Scripting.Dictionary")
+    newCols.CompareMode = 1
+
+    Dim c As Long, keys As Variant, oldKey As String, rawHdr As Variant, hdrName As String
+    Dim uniqueName As String, dupCount As Long, col As cColumn, newCol As cColumn
+    Dim r As Long, newRowCount As Long
+    newRowCount = mRowCount - RowIndex
+    keys = mCols.Keys
+
+    For c = 0 To mCols.Count - 1
+        oldKey = CStr(keys(c))
+        Set col = mCols.Item(oldKey)
+        rawHdr = col.Item(RowIndex)
+
+        If IsError(rawHdr) Or IsEmpty(rawHdr) Or IsNull(rawHdr) Then
+            hdrName = "Column_" & (c + 1)
+        Else
+            hdrName = Trim$(CStr(rawHdr))
+            If CleanNames Then
+                hdrName = Replace(hdrName, vbCrLf, " ")
+                hdrName = Replace(hdrName, vbCr, " ")
+                hdrName = Replace(hdrName, vbLf, " ")
+                hdrName = Replace(hdrName, vbTab, " ")
+                Do While InStr(hdrName, "  ") > 0
+                    hdrName = Replace(hdrName, "  ", " ")
+                Loop
+                hdrName = Trim$(hdrName)
+            End If
+            If Len(hdrName) = 0 Then hdrName = "Column_" & (c + 1)
+        End If
+
+        uniqueName = hdrName
+        dupCount = 1
+        Do While newCols.Exists(uniqueName)
+            dupCount = dupCount + 1
+            uniqueName = hdrName & "_" & dupCount
+        Loop
+
+        Set newCol = New cColumn
+        newCol.Name = uniqueName
+        newCol.EnsureCapacity newRowCount
+        newCol.SetCount newRowCount
+        For r = 1 To newRowCount
+            newCol.Item(r) = col.Item(RowIndex + r)
+        Next r
+        newCols.Add uniqueName, newCol
+    Next c
+
+    Set mCols = newCols
+    mRowCount = newRowCount
+    Set mRowIndexMap = Nothing
+    mIndexColumnName = ""
+    mIndexDirty = False
+    SyncColList
+
+    Set PromoteHeaders = Me
+End Function
+
+' Casts column elements to target data type: STRING, LONG, DOUBLE, DATE, BOOLEAN.
+Public Function CastColumn(ByVal ColumnKey As Variant, ByVal TargetType As String) As cDataFrame
+    Dim colName As String
+    colName = ResolveColName(ColumnKey)
+    Dim cCol As cColumn
+    Set cCol = mCols.Item(colName)
+    Set mCols.Item(colName) = cCol.Cast(TargetType, colName)
+    SyncColList
+    mIndexDirty = True
+    Set CastColumn = Me
+End Function
+
+' Coerces dirty numeric string column into Double.
+Public Function CoerceNumeric(ByVal ColumnKey As Variant, _
+                              Optional ByVal DefaultVal As Variant = 0#) As cDataFrame
+    Dim colName As String
+    colName = ResolveColName(ColumnKey)
+    Dim cCol As cColumn
+    Set cCol = mCols.Item(colName)
+    Set mCols.Item(colName) = cCol.CoerceNumeric(colName, DefaultVal)
+    SyncColList
+    mIndexDirty = True
+    Set CoerceNumeric = Me
+End Function
+
+' Coerces date string/serial column into Date variants.
+Public Function CoerceDate(ByVal ColumnKey As Variant, _
+                           Optional ByVal DefaultVal As Variant) As cDataFrame
+    Dim colName As String
+    colName = ResolveColName(ColumnKey)
+    Dim cCol As cColumn
+    Set cCol = mCols.Item(colName)
+    If IsMissing(DefaultVal) Then
+        Set mCols.Item(colName) = cCol.CoerceDate(colName)
+    Else
+        Set mCols.Item(colName) = cCol.CoerceDate(colName, DefaultVal)
+    End If
+    SyncColList
+    mIndexDirty = True
+    Set CoerceDate = Me
+End Function
+
+' Splits a single column into multiple columns based on a delimiter.
+Public Function SplitColumn(ByVal ColumnKey As Variant, _
+                            ByVal Delimiter As String, _
+                            Optional ByVal NewColPrefix As String = "", _
+                            Optional ByVal MaxSplits As Long = -1, _
+                            Optional ByVal DropOriginal As Boolean = False) As cDataFrame
+    Dim colName As String
+    colName = ResolveColName(ColumnKey)
+    Dim srcCol As cColumn
+    Set srcCol = mCols.Item(colName)
+
+    Dim pfx As String
+    pfx = IIf(Len(Trim$(NewColPrefix)) > 0, Trim$(NewColPrefix), colName)
+
+    Dim r As Long, v As Variant, parts() As String, maxParts As Long, curParts As Long
+    maxParts = 1
+    For r = 1 To mRowCount
+        v = srcCol.Item(r)
+        If Not (IsEmpty(v) Or IsNull(v) Or IsError(v)) Then
+            If MaxSplits > 0 Then
+                parts = Split(CStr(v), Delimiter, MaxSplits + 1)
+            Else
+                parts = Split(CStr(v), Delimiter)
+            End If
+            curParts = UBound(parts) - LBound(parts) + 1
+            If curParts > maxParts Then maxParts = curParts
+        End If
+    Next r
+
+    Dim p As Long, newCols() As cColumn, cName As String
+    ReDim newCols(1 To maxParts)
+    For p = 1 To maxParts
+        cName = pfx & "_" & p
+        Set newCols(p) = AddColumn(cName)
+    Next p
+
+    For r = 1 To mRowCount
+        v = srcCol.Item(r)
+        If Not (IsEmpty(v) Or IsNull(v) Or IsError(v)) Then
+            If MaxSplits > 0 Then
+                parts = Split(CStr(v), Delimiter, MaxSplits + 1)
+            Else
+                parts = Split(CStr(v), Delimiter)
+            End If
+            For p = 1 To maxParts
+                If LBound(parts) + p - 1 <= UBound(parts) Then
+                    newCols(p).Item(r) = parts(LBound(parts) + p - 1)
+                Else
+                    newCols(p).Item(r) = ""
+                End If
+            Next p
+        Else
+            For p = 1 To maxParts
+                newCols(p).Item(r) = ""
+            Next p
+        End If
+    Next r
+
+    If DropOriginal Then
+        DropColumn colName
+    End If
+
+    Set SplitColumn = Me
+End Function
+
+' Combines multiple columns into a single column with a separator.
+Public Function CombineColumns(ByVal ColumnKeys As Variant, _
+                               ByVal NewColName As String, _
+                               Optional ByVal Separator As String = " ", _
+                               Optional ByVal DropOriginals As Boolean = False) As cDataFrame
+    If Not IsArray(ColumnKeys) Then
+        Err.Raise 5, "cDataFrame.CombineColumns", "ColumnKeys must be an array."
+    End If
+
+    Dim lbK As Long, ubK As Long, kCount As Long, k As Long
+    lbK = LBound(ColumnKeys): ubK = UBound(ColumnKeys)
+    kCount = ubK - lbK + 1
+    If kCount = 0 Then
+        Err.Raise 5, "cDataFrame.CombineColumns", "ColumnKeys cannot be empty."
+    End If
+
+    Dim srcCols() As cColumn, srcNames() As String
+    ReDim srcCols(1 To kCount)
+    ReDim srcNames(1 To kCount)
+    For k = 1 To kCount
+        srcNames(k) = ResolveColName(ColumnKeys(lbK + k - 1))
+        Set srcCols(k) = mCols.Item(srcNames(k))
+    Next k
+
+    Dim outCol As cColumn
+    Set outCol = AddColumn(NewColName)
+
+    Dim r As Long, rowStr As String, v As Variant
+    For r = 1 To mRowCount
+        rowStr = ""
+        For k = 1 To kCount
+            v = srcCols(k).Item(r)
+            If Not (IsEmpty(v) Or IsNull(v) Or IsError(v)) Then
+                If Len(rowStr) > 0 Then
+                    rowStr = rowStr & Separator & CStr(v)
+                Else
+                    rowStr = CStr(v)
+                End If
+            End If
+        Next k
+        outCol.Item(r) = rowStr
+    Next r
+
+    If DropOriginals Then
+        For k = 1 To kCount
+            If StrComp(srcNames(k), NewColName, vbTextCompare) <> 0 Then
+                If HasColumn(srcNames(k)) Then DropColumn srcNames(k)
+            End If
+        Next k
+    End If
+
+    Set CombineColumns = Me
+End Function
+
+' Maps values of a column using Dictionary or 2D Array mapping.
+Public Function MapValues(ByVal ColumnKey As Variant, _
+                          ByVal MappingDictOrArray As Variant, _
+                          Optional ByVal DefaultVal As Variant, _
+                          Optional ByVal ResultColName As String = "") As cDataFrame
+    Dim colName As String
+    colName = ResolveColName(ColumnKey)
+    Dim srcCol As cColumn
+    Set srcCol = mCols.Item(colName)
+
+    Dim mappedCol As cColumn
+    Set mappedCol = srcCol.MapValues(MappingDictOrArray, DefaultVal, IIf(Len(ResultColName) > 0, ResultColName, colName))
+
+    If Len(Trim$(ResultColName)) > 0 And StrComp(Trim$(ResultColName), colName, vbTextCompare) <> 0 Then
+        Dim cleanTarget As String
+        cleanTarget = ResolveUniqueHeader(Trim$(ResultColName), False)
+        mappedCol.Name = cleanTarget
+        mCols.Add cleanTarget, mappedCol
+        SyncColList
+    Else
+        Set mCols.Item(colName) = mappedCol
+        SyncColList
+        mIndexDirty = True
+    End If
+
+    Set MapValues = Me
+End Function
+
+' Bins numeric column values into categorized buckets given Cutoffs and Labels arrays.
+Public Function BinColumn(ByVal ColumnKey As Variant, _
+                          ByVal Cutoffs As Variant, _
+                          ByVal Labels As Variant, _
+                          Optional ByVal ResultColName As String = "") As cDataFrame
+    Dim colName As String
+    colName = ResolveColName(ColumnKey)
+    Dim srcCol As cColumn
+    Set srcCol = mCols.Item(colName)
+
+    Dim binnedCol As cColumn
+    Set binnedCol = srcCol.BinColumn(Cutoffs, Labels, IIf(Len(ResultColName) > 0, ResultColName, colName & "_Binned"))
+
+    Dim targetName As String
+    If Len(Trim$(ResultColName)) > 0 Then
+        targetName = Trim$(ResultColName)
+    Else
+        targetName = colName & "_Binned"
+    End If
+
+    If StrComp(targetName, colName, vbTextCompare) <> 0 Then
+        Dim cleanBinTarget As String
+        cleanBinTarget = ResolveUniqueHeader(targetName, False)
+        binnedCol.Name = cleanBinTarget
+        mCols.Add cleanBinTarget, binnedCol
+        SyncColList
+    Else
+        Set mCols.Item(colName) = binnedCol
+        SyncColList
+        mIndexDirty = True
+    End If
+
+    Set BinColumn = Me
+End Function
+
+' Expands delimited strings in ColumnKey into multiple rows (one row per item).
+Public Function Explode(ByVal ColumnKey As Variant, _
+                        Optional ByVal Delimiter As String = ",") As cDataFrame
+    Dim colName As String
+    colName = ResolveColName(ColumnKey)
+    Dim expCol As cColumn
+    Set expCol = mCols.Item(colName)
+
+    Dim res As New cDataFrame
+    Dim k As Variant
+    For Each k In mCols.Keys
+        res.AddColumn CStr(k)
+    Next k
+
+    If mRowCount = 0 Then
+        Set Explode = res
+        Exit Function
+    End If
+
+    Dim explodedRows As New Collection
+    Dim r As Long, v As Variant, parts() As String, p As Long, rowVals() As Variant
+    Dim colCnt As Long, c As Long
+    colCnt = mCols.Count
+    Dim keys As Variant
+    keys = mCols.Keys
+
+    For r = 1 To mRowCount
+        v = expCol.Item(r)
+        If IsEmpty(v) Or IsNull(v) Or IsError(v) Then
+            ReDim rowVals(1 To colCnt)
+            For c = 1 To colCnt
+                rowVals(c) = mCols.Item(keys(c - 1)).Item(r)
+            Next c
+            explodedRows.Add rowVals
+        Else
+            parts = Split(CStr(v), Delimiter)
+            If UBound(parts) < LBound(parts) Then
+                ReDim rowVals(1 To colCnt)
+                For c = 1 To colCnt
+                    rowVals(c) = mCols.Item(keys(c - 1)).Item(r)
+                Next c
+                explodedRows.Add rowVals
+            Else
+                For p = LBound(parts) To UBound(parts)
+                    ReDim rowVals(1 To colCnt)
+                    For c = 1 To colCnt
+                        If StrComp(CStr(keys(c - 1)), colName, vbTextCompare) = 0 Then
+                            rowVals(c) = Trim$(parts(p))
+                        Else
+                            rowVals(c) = mCols.Item(keys(c - 1)).Item(r)
+                        End If
+                    Next c
+                    explodedRows.Add rowVals
+                Next p
+            End If
+        End If
+    Next r
+
+    Dim nTotal As Long
+    nTotal = explodedRows.Count
+    If nTotal > 0 Then
+        Dim arr2D() As Variant
+        ReDim arr2D(1 To nTotal, 1 To colCnt)
+        Dim rv As Variant
+        r = 0
+        For Each rv In explodedRows
+            r = r + 1
+            For c = 1 To colCnt
+                arr2D(r, c) = rv(c)
+            Next c
+        Next rv
+        res.AddRows arr2D
+    End If
+
+    Set Explode = res
+End Function

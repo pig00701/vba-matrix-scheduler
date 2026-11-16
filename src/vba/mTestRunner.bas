@@ -89,6 +89,7 @@ Public Function RunAllTests() As String
     Test_FormulaEngine
     Test_AllClassesGapCoverage
     Test_GetDataAndRangeGaps
+    Test_CleanAndTransformData
 
     Dim tElapsed As Double
     tElapsed = Timer - tStart
@@ -4060,6 +4061,177 @@ TestFail:
     If Not ws Is Nothing Then ws.Delete
     xlApp.DisplayAlerts = True
     RecordFailure "Test_GetDataAndRangeGaps", failErr
+End Sub
+
+' ------------------------------------------------------------------------------
+' Test 47: Clean Data & Transform Data Operations
+' ------------------------------------------------------------------------------
+Private Sub Test_CleanAndTransformData()
+    On Error GoTo TestFail
+    LogPrint "[TEST 47] Clean Data & Transform Data Operations..."
+
+    ' 1. StrClean & NormalizeWhitespace
+    LogPrint "  [47.1] StrClean & NormalizeWhitespace..."
+    Dim colStr As New cColumn
+    colStr.Name = "DirtyStr"
+    colStr.Append "  Hello" & Chr$(1) & Chr$(2) & " World" & Chr$(160) & "  "
+    colStr.Append "Line1" & vbCrLf & "  Line2" & vbTab & "Line3  "
+
+    Dim cClean As cColumn
+    Set cClean = colStr.StrClean()
+    AssertEqual cClean.Item(1), "Hello World", "StrClean removes control chars and non-breaking space"
+
+    Dim cNorm As cColumn
+    Set cNorm = colStr.NormalizeWhitespace()
+    AssertEqual cNorm.Item(1), "Hello World", "NormalizeWhitespace collapses space"
+    AssertEqual cNorm.Item(2), "Line1 Line2 Line3", "NormalizeWhitespace normalizes linebreaks/tabs"
+
+    ' 2. CoerceNumeric & CoerceDate & Cast
+    LogPrint "  [47.2] CoerceNumeric & Cast..."
+    Dim colNum As New cColumn
+    colNum.Append " $1,250.50 "
+    colNum.Append "(75.25)"
+    colNum.Append "15%"
+    colNum.Append "N/A"
+
+    Dim cNum As cColumn
+    Set cNum = colNum.CoerceNumeric(, -1#)
+    AssertEqual cNum.Item(1), 1250.5, "CoerceNumeric parses currency with comma"
+    AssertEqual cNum.Item(2), -75.25, "CoerceNumeric parses parens negative"
+    AssertEqual cNum.Item(3), 0.15, "CoerceNumeric parses percentage"
+    AssertEqual cNum.Item(4), -1#, "CoerceNumeric uses default value on failure"
+
+    LogPrint "  [47.3] CoerceDate..."
+    Dim colDt As New cColumn
+    colDt.Append "2026-11-16"
+    colDt.Append 45612 ' Excel serial date
+    Dim cDt As cColumn
+    Set cDt = colDt.CoerceDate()
+    AssertTrue IsDate(cDt.Item(1)), "CoerceDate parses item 1 as Date"
+    AssertEqual CLng(Year(cDt.Item(1))), 2026&, "CoerceDate parses ISO year"
+    AssertEqual CLng(Month(cDt.Item(1))), 11&, "CoerceDate parses ISO month"
+    AssertEqual CLng(Day(cDt.Item(1))), 16&, "CoerceDate parses ISO day"
+    AssertTrue IsDate(cDt.Item(2)), "CoerceDate parses numeric serial"
+
+    Dim cCast As cColumn
+    Set cCast = colNum.Cast("STRING")
+    AssertEqual VarType(cCast.Item(1)), vbString, "Cast converts to String"
+
+    ' 3. ExtractRegex & ReplaceRegex
+    LogPrint "  [47.4] ExtractRegex & ReplaceRegex..."
+    Dim colRx As New cColumn
+    colRx.Append "Invoice #INV-2024-9988 paid"
+    Dim cExt As cColumn
+    Set cExt = colRx.ExtractRegex("INV-\d{4}-\d+", 0)
+    AssertEqual cExt.Item(1), "INV-2024-9988", "ExtractRegex extracts pattern match"
+
+    Dim cRep As cColumn
+    Set cRep = colRx.ReplaceRegex("\d+", "XXX")
+    AssertEqual cRep.Item(1), "Invoice #INV-XXX-XXX paid", "ReplaceRegex replaces all digits"
+
+    ' 4. MapValues & BinColumn
+    LogPrint "  [47.5] MapValues & BinColumn..."
+    Dim colMap As New cColumn
+    colMap.Append "M"
+    colMap.Append "F"
+    colMap.Append "X"
+    Dim dMap As Object
+    Set dMap = CreateObject("Scripting.Dictionary")
+    dMap("M") = "Male"
+    dMap("F") = "Female"
+    Dim cMapped As cColumn
+    Set cMapped = colMap.MapValues(dMap, "Other")
+    AssertEqual cMapped.Item(1), "Male", "MapValues maps M -> Male"
+    AssertEqual cMapped.Item(2), "Female", "MapValues maps F -> Female"
+    AssertEqual cMapped.Item(3), "Other", "MapValues uses default for unmapped X"
+
+    Dim colBin As New cColumn
+    colBin.Append 25
+    colBin.Append 65
+    colBin.Append 90
+    Dim cBinned As cColumn
+    Set cBinned = colBin.BinColumn(Array(50, 80), Array("Low", "Mid", "High"))
+    AssertEqual cBinned.Item(1), "Low", "BinColumn 25 < 50 is Low"
+    AssertEqual cBinned.Item(2), "Mid", "BinColumn 50 <= 65 < 80 is Mid"
+    AssertEqual cBinned.Item(3), "High", "BinColumn 90 >= 80 is High"
+
+    ' 5. CleanHeaders
+    LogPrint "  [47.6] CleanHeaders..."
+    Dim dfHdr As New cDataFrame
+    dfHdr.AddColumn " First Name "
+    dfHdr.AddColumn "Last" & vbCrLf & "Name"
+    dfHdr.AddRow "Alice", "Smith"
+    dfHdr.CleanHeaders True, True
+    AssertTrue dfHdr.HasColumn("first_name"), "CleanHeaders converts to lowercase with underscores"
+    AssertTrue dfHdr.HasColumn("last_name"), "CleanHeaders removes newline"
+
+    ' 6. DropEmptyRows & DropEmptyColumns
+    LogPrint "  [47.7] DropEmptyRows & DropEmptyColumns..."
+    Dim dfEmpty As New cDataFrame
+    dfEmpty.AddColumn "A"
+    dfEmpty.AddColumn "B"
+    dfEmpty.AddColumn "EmptyCol"
+    dfEmpty.AddRow "1", "X", ""
+    dfEmpty.AddRow "", "", ""
+    dfEmpty.AddRow "2", "Y", ""
+    Dim dfNoCols As cDataFrame
+    Set dfNoCols = dfEmpty.DropEmptyColumns()
+    AssertFalse dfNoCols.HasColumn("EmptyCol"), "DropEmptyColumns removes all-empty column"
+    AssertEqual dfNoCols.ColumnCount, 2, "DropEmptyColumns keeps 2 non-empty columns"
+
+    Dim dfNoRows As cDataFrame
+    Set dfNoRows = dfNoCols.DropEmptyRows()
+    AssertEqual dfNoRows.RowCount, 2, "DropEmptyRows removes row with all blank values"
+
+    ' 7. PromoteHeaders
+    LogPrint "  [47.8] PromoteHeaders..."
+    Dim dfP As New cDataFrame
+    dfP.AddColumn "C1"
+    dfP.AddColumn "C2"
+    dfP.AddRow "EmpID", "Score"
+    dfP.AddRow "E001", 95
+    dfP.AddRow "E002", 88
+    dfP.PromoteHeaders 1
+    AssertTrue dfP.HasColumn("EmpID"), "PromoteHeaders promotes row 1 to EmpID"
+    AssertTrue dfP.HasColumn("Score"), "PromoteHeaders promotes row 1 to Score"
+    AssertEqual dfP.RowCount, 2, "PromoteHeaders decrements RowCount by 1"
+    AssertEqual dfP.Column("Score").Item(1), 95, "PromoteHeaders preserves data rows"
+
+    ' 8. SplitColumn & CombineColumns
+    LogPrint "  [47.9] SplitColumn & CombineColumns..."
+    Dim dfSp As New cDataFrame
+    dfSp.AddColumn "FullName"
+    dfSp.AddRow "John Doe"
+    dfSp.AddRow "Jane Smith"
+    dfSp.SplitColumn "FullName", " ", "Part", , False
+    AssertTrue dfSp.HasColumn("Part_1"), "SplitColumn creates Part_1"
+    AssertEqual dfSp.Column("Part_1").Item(1), "John", "SplitColumn Part_1 item 1"
+    AssertEqual dfSp.Column("Part_2").Item(2), "Smith", "SplitColumn Part_2 item 2"
+
+    dfSp.CombineColumns Array("Part_1", "Part_2"), "JoinedName", "-"
+    AssertTrue dfSp.HasColumn("JoinedName"), "CombineColumns creates JoinedName"
+    AssertEqual dfSp.Column("JoinedName").Item(1), "John-Doe", "CombineColumns joins with hyphen"
+
+    ' 9. Explode
+    LogPrint "  [47.10] Explode..."
+    Dim dfEx As New cDataFrame
+    dfEx.AddColumn "Dept"
+    dfEx.AddColumn "Skills"
+    dfEx.AddRow "IT", "VBA, SQL, Python"
+    dfEx.AddRow "HR", "Recruiting"
+    Dim dfExploded As cDataFrame
+    Set dfExploded = dfEx.Explode("Skills", ",")
+    AssertEqual dfExploded.RowCount, 4, "Explode expands 2 rows to 4 rows"
+    AssertEqual dfExploded.Column("Skills").Item(1), "VBA", "Explode item 1"
+    AssertEqual dfExploded.Column("Skills").Item(2), "SQL", "Explode item 2"
+    AssertEqual dfExploded.Column("Skills").Item(3), "Python", "Explode item 3"
+    AssertEqual dfExploded.Column("Dept").Item(3), "IT", "Explode preserves Dept for row 3"
+    Exit Sub
+
+TestFail:
+    Dim failErr As String
+    failErr = Err.Description
+    RecordFailure "Test_CleanAndTransformData", failErr
 End Sub
 
 Private Sub SafeDeleteName(ByVal AnchorName As String)
