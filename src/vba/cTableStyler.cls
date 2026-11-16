@@ -2172,3 +2172,62 @@ Public Function ApplyIconSets(ByVal ColumnKeyOrPattern As Variant, _
     Next i
     Set ApplyIconSets = Me
 End Function
+
+' Auto-fits columns of the attached table and clamps each ColumnWidth within [MinWidth, MaxWidth].
+Public Function AutoFitWithLimits(Optional ByVal MinWidth As Double = 8, _
+                                  Optional ByVal MaxWidth As Double = 45) As cTableStyler
+    CheckAttached "AutoFitWithLimits"
+    If mTableRange Is Nothing Then
+        Set AutoFitWithLimits = Me
+        Exit Function
+    End If
+
+    On Error Resume Next
+    mTableRange.EntireColumn.AutoFit
+    Dim c As Long, curW As Double
+    For c = 1 To mColumnCount
+        curW = mTableRange.Columns(c).ColumnWidth
+        If curW < MinWidth Then
+            mTableRange.Columns(c).ColumnWidth = MinWidth
+        ElseIf curW > MaxWidth Then
+            mTableRange.Columns(c).ColumnWidth = MaxWidth
+        End If
+    Next c
+    On Error GoTo 0
+    Set AutoFitWithLimits = Me
+End Function
+
+' Freezes panes right below the header row (and optionally after FreezeColumns).
+Public Function FreezeHeader(Optional ByVal FreezeColumns As Long = 0) As cTableStyler
+    CheckAttached "FreezeHeader"
+    If mHeaderRange Is Nothing Then
+        Set FreezeHeader = Me
+        Exit Function
+    End If
+
+    On Error Resume Next
+    If mWorksheet.Application.Visible Then
+        Dim win As Object
+        Set win = mWorksheet.Application.ActiveWindow
+        If Not win Is Nothing Then
+            mWorksheet.Activate
+            win.FreezePanes = False
+            win.SplitRow = mHeaderRange.Row - win.ScrollRow + 1
+            If FreezeColumns > 0 Then
+                win.SplitColumn = (mHeaderRange.Column + FreezeColumns - 1) - win.ScrollColumn + 1
+            Else
+                win.SplitColumn = 0
+            End If
+            win.FreezePanes = True
+        End If
+    End If
+    On Error GoTo 0
+    Set FreezeHeader = Me
+End Function
+
+Private Sub CheckAttached(ByVal MethodName As String)
+    If mWorksheet Is Nothing Or mTopLeftCell Is Nothing Then
+        Err.Raise 91, "cTableStyler." & MethodName, _
+            "Styler is not attached to a Range or DataFrame. Call Attach() or AttachRange() first."
+    End If
+End Sub

@@ -2166,26 +2166,14 @@ End Function
 
 ' Loads entire range in a single COM read. Handles 1-cell scalar range cleanly.
 Public Function LoadFromRange(ByVal SourceRange As Object, _
-                             Optional ByVal HasHeaders As Boolean = True) As cDataFrame
+                             Optional ByVal HasHeaders As Boolean = True, _
+                             Optional ByVal FillMerged As Boolean = False) As cDataFrame
     If SourceRange Is Nothing Then
         Err.Raise 91, "cDataFrame.LoadFromRange", "SourceRange cannot be Nothing."
     End If
 
     Dim vData As Variant
-    On Error Resume Next
-    vData = SourceRange.Value2
-    If Err.Number <> 0 Then
-        Err.Clear
-        vData = SourceRange.Value
-    End If
-    On Error GoTo 0
-
-    ' Guard against single-cell scalar range
-    If Not IsArray(vData) Then
-        Dim singleCell(1 To 1, 1 To 1) As Variant
-        singleCell(1, 1) = vData
-        vData = singleCell
-    End If
+    vData = ReadRangeTo2D(SourceRange, FillMerged)
 
     Dim rLb As Long, rUb As Long, cLb As Long, cUb As Long
     rLb = LBound(vData, 1)
@@ -5350,3 +5338,595 @@ Public Function Transpose() As cDataFrame
 
     Set Transpose = res
 End Function
+
+' =============================================================================
+' GET DATA & ENHANCED RANGE OPERATIONS
+' =============================================================================
+
+' Loads DataFrame from a 2D Variant array (0-based or 1-based).
+Public Function LoadFrom2DArray(ByVal DataArray As Variant, _
+                                Optional ByVal HasHeaders As Boolean = True, _
+                                Optional ByVal Headers As Variant) As cDataFrame
+    If Not IsArray(DataArray) Then
+        Err.Raise 5, "cDataFrame.LoadFrom2DArray", "DataArray must be a 2D array."
+    End If
+
+    Dim dim2Check As Long
+    On Error Resume Next
+    dim2Check = UBound(DataArray, 2)
+    If Err.Number <> 0 Then
+        Err.Clear
+        On Error GoTo 0
+        Err.Raise 5, "cDataFrame.LoadFrom2DArray", "DataArray must have 2 dimensions."
+    End If
+    On Error GoTo 0
+
+    Set LoadFrom2DArray = LoadFromVariant2D(DataArray, HasHeaders, Headers)
+End Function
+
+' Loads and unions CSV/Excel files matching FilePattern from a folder (Power Query From Folder style).
+Public Function LoadFromFolder(ByVal FolderPath As String, _
+                               Optional ByVal FilePattern As String = "*.csv", _
+                               Optional ByVal HasHeaders As Boolean = True, _
+                               Optional ByVal AddSourceColumn As Boolean = True, _
+                               Optional ByVal Recursive As Boolean = False, _
+                               Optional ByVal SheetName As String = "") As cDataFrame
+    Dim fso As Object
+    Set fso = CreateObject("Scripting.FileSystemObject")
+    If Not fso.FolderExists(FolderPath) Then
+        Err.Raise 76, "cDataFrame.LoadFromFolder", "Folder not found: " & FolderPath
+    End If
+
+    Dim files As New Collection
+    CollectFolderFiles fso.GetFolder(FolderPath), FilePattern, Recursive, files
+
+    mCols.RemoveAll
+    mRowCount = 0
+    Set mRowIndexMap = Nothing
+    mIndexColumnName = ""
+    mIndexDirty = False
+
+    Dim fItem As Variant, fPath As String, fName As String, ext As String
+    Dim tmpDf As cDataFrame
+    For Each fItem In files
+        fPath = CStr(fItem)
+        fName = fso.GetFileName(fPath)
+        If Left$(fName, 2) <> "~$" Then
+            ext = LCase$(fso.GetExtensionName(fPath))
+            Set tmpDf = New cDataFrame
+            If ext = "csv" Or ext = "tsv" Or ext = "txt" Then
+                tmpDf.LoadFromCSV fPath, IIf(ext = "tsv", vbTab, ","), HasHeaders
+            ElseIf Left$(ext, 3) = "xls" Then
+                tmpDf.LoadFromWorkbook fPath, SheetName, HasHeaders
+            Else
+                Set tmpDf = Nothing
+            End If
+
+            If Not tmpDf Is Nothing Then
+                If tmpDf.ColumnCount > 0 Then
+                    If AddSourceColumn Then
+                        AddConstantColumnToDF tmpDf, "SourceFile", fName
+                    End If
+                    AppendDataFrameRows tmpDf
+                End If
+            End If
+        End If
+    Next fItem
+
+    Set LoadFromFolder = Me
+End Function
+
+' Loads DataFrame from the CurrentRegion surrounding AnchorCell.
+Public Function LoadFromCurrentRegion(ByVal AnchorCell As Object, _
+                                      Optional ByVal HasHeaders As Boolean = True, _
+                                      Optional ByVal FillMerged As Boolean = False) As cDataFrame
+    If AnchorCell Is Nothing Then
+        Err.Raise 91, "cDataFrame.LoadFromCurrentRegion", "AnchorCell cannot be Nothing."
+    End If
+    Set LoadFromCurrentRegion = LoadFromRange(AnchorCell.CurrentRegion, HasHeaders, FillMerged)
+End Function
+
+' Loads only visible rows from SourceRange (skips AutoFilter/manually hidden rows).
+Public Function LoadFromVisibleRange(ByVal SourceRange As Object, _
+                                     Optional ByVal HasHeaders As Boolean = True) As cDataFrame
+    If SourceRange Is Nothing Then
+        Err.Raise 91, "cDataFrame.LoadFromVisibleRange", "SourceRange cannot be Nothing."
+    End If
+
+    Dim visibleRows As New Collection
+    Dim area As Object, r As Long, c As Long, colCnt As Long
+    Dim rowVals() As Variant
+
+    colCnt = SourceRange.Areas(1).Columns.Count
+    For Each area In SourceRange.Areas
+        If area.Columns.Count > colCnt Then colCnt = area.Columns.Count
+        For r = 1 To area.Rows.Count
+            If Not area.Rows(r).EntireRow.Hidden Then
+                ReDim rowVals(1 To colCnt)
+                For c = 1 To area.Columns.Count
+                    rowVals(c) = area.Cells(r, c).Value2
+                Next c
+                visibleRows.Add rowVals
+            End If
+        Next r
+    Next area
+
+    If visibleRows.Count = 0 Then
+        mCols.RemoveAll
+        mRowCount = 0
+        Set LoadFromVisibleRange = Me
+        Exit Function
+    End If
+
+    Dim vData() As Variant
+    ReDim vData(1 To visibleRows.Count, 1 To colCnt)
+    Dim rv As Variant
+    r = 0
+    For Each rv In visibleRows
+        r = r + 1
+        For c = 1 To colCnt
+            vData(r, c) = rv(c)
+        Next c
+    Next rv
+
+    Set LoadFromVisibleRange = LoadFromVariant2D(vData, HasHeaders)
+End Function
+
+' Loads and stacks all Areas of a potentially multi-area Range.
+Public Function LoadFromRangeAreas(ByVal SourceRange As Object, _
+                                   Optional ByVal HasHeaders As Boolean = True, _
+                                   Optional ByVal FillMerged As Boolean = False, _
+                                   Optional ByVal AreasRepeatHeaders As Boolean = False) As cDataFrame
+    If SourceRange Is Nothing Then
+        Err.Raise 91, "cDataFrame.LoadFromRangeAreas", "SourceRange cannot be Nothing."
+    End If
+
+    If SourceRange.Areas.Count = 1 Then
+        Set LoadFromRangeAreas = LoadFromRange(SourceRange, HasHeaders, FillMerged)
+        Exit Function
+    End If
+
+    Dim stackedRows As New Collection
+    Dim maxCols As Long, areaIdx As Long
+    Dim area As Object, areaData As Variant
+    Dim rLb As Long, rUb As Long, cLb As Long, cUb As Long
+    Dim r As Long, c As Long, startRow As Long, rowVals() As Variant
+
+    areaIdx = 0
+    For Each area In SourceRange.Areas
+        areaIdx = areaIdx + 1
+        areaData = ReadRangeTo2D(area, FillMerged)
+        rLb = LBound(areaData, 1): rUb = UBound(areaData, 1)
+        cLb = LBound(areaData, 2): cUb = UBound(areaData, 2)
+        If (cUb - cLb + 1) > maxCols Then maxCols = cUb - cLb + 1
+
+        startRow = IIf(HasHeaders And AreasRepeatHeaders And areaIdx > 1, rLb + 1, rLb)
+        For r = startRow To rUb
+            ReDim rowVals(1 To cUb - cLb + 1)
+            For c = cLb To cUb
+                rowVals(c - cLb + 1) = areaData(r, c)
+            Next c
+            stackedRows.Add rowVals
+        Next r
+    Next area
+
+    If stackedRows.Count = 0 Then
+        mCols.RemoveAll
+        mRowCount = 0
+        Set LoadFromRangeAreas = Me
+        Exit Function
+    End If
+
+    Dim vData() As Variant
+    ReDim vData(1 To stackedRows.Count, 1 To maxCols)
+    Dim rv As Variant, nCols As Long
+    r = 0
+    For Each rv In stackedRows
+        r = r + 1
+        nCols = UBound(rv)
+        For c = 1 To nCols
+            vData(r, c) = rv(c)
+        Next c
+    Next rv
+
+    Set LoadFromRangeAreas = LoadFromVariant2D(vData, HasHeaders)
+End Function
+
+' Loads displayed formatted text (.Text) from SourceRange (preserves leading zeros/formats).
+Public Function LoadFromRangeText(ByVal SourceRange As Object, _
+                                  Optional ByVal HasHeaders As Boolean = True) As cDataFrame
+    Set LoadFromRangeText = LoadFromRangeCellProp(SourceRange, "TEXT", HasHeaders)
+End Function
+
+' Loads formulas (.Formula) from SourceRange instead of evaluated values.
+Public Function LoadFromRangeFormulas(ByVal SourceRange As Object, _
+                                      Optional ByVal HasHeaders As Boolean = True) As cDataFrame
+    Set LoadFromRangeFormulas = LoadFromRangeCellProp(SourceRange, "FORMULA", HasHeaders)
+End Function
+
+' Writes DataFrame to TargetCell and returns the written Range object.
+Public Function ToRangeAsObject(ByVal TargetCell As Object, _
+                                Optional ByVal IncludeHeaders As Boolean = True) As Object
+    ToRange TargetCell, IncludeHeaders
+    If mCols.Count = 0 Then Exit Function
+    Dim outputRows As Long
+    outputRows = mRowCount + IIf(IncludeHeaders, 1, 0)
+    If outputRows = 0 Then Exit Function
+    Set ToRangeAsObject = TargetCell.Resize(outputRows, mCols.Count)
+End Function
+
+' Replaces an existing table region at TargetCell, clearing stale rows below / columns right.
+Public Function ToRangeReplace(ByVal TargetCell As Object, _
+                               Optional ByVal IncludeHeaders As Boolean = True, _
+                               Optional ByVal ClearBelow As Boolean = True, _
+                               Optional ByVal ClearRight As Boolean = False) As Object
+    If TargetCell Is Nothing Then
+        Err.Raise 91, "cDataFrame.ToRangeReplace", "TargetCell cannot be Nothing."
+    End If
+    Dim ws As Object
+    Set ws = TargetCell.Worksheet
+    If ws.ProtectContents Then
+        Err.Raise 1004, "cDataFrame.ToRangeReplace", _
+            "Cannot write to protected worksheet '" & ws.Name & "'."
+    End If
+
+    Dim curReg As Object
+    Set curReg = TargetCell.CurrentRegion
+    Dim oldBottom As Long, oldRight As Long
+    oldBottom = curReg.Row + curReg.Rows.Count - 1
+    oldRight = curReg.Column + curReg.Columns.Count - 1
+
+    Dim newRows As Long, newCols As Long
+    newRows = mRowCount + IIf(IncludeHeaders, 1, 0)
+    newCols = mCols.Count
+    Dim newBottom As Long, newRight As Long
+    newBottom = TargetCell.Row + newRows - 1
+    newRight = TargetCell.Column + newCols - 1
+
+    If ClearBelow And oldBottom > newBottom And oldRight >= TargetCell.Column Then
+        ws.Range(ws.Cells(newBottom + 1, TargetCell.Column), ws.Cells(oldBottom, oldRight)).ClearContents
+    End If
+    If ClearRight And oldRight > newRight And oldBottom >= TargetCell.Row Then
+        ws.Range(ws.Cells(TargetCell.Row, newRight + 1), ws.Cells(oldBottom, oldRight)).ClearContents
+    End If
+
+    Set ToRangeReplace = ToRangeAsObject(TargetCell, IncludeHeaders)
+End Function
+
+' Appends DataFrame rows below an existing table anchored at AnchorCell (or writes fresh if empty).
+Public Function AppendToRange(ByVal AnchorCell As Object, _
+                              Optional ByVal IncludeHeadersIfEmpty As Boolean = True) As Object
+    If AnchorCell Is Nothing Then
+        Err.Raise 91, "cDataFrame.AppendToRange", "AnchorCell cannot be Nothing."
+    End If
+    If mCols.Count = 0 Or mRowCount = 0 Then Exit Function
+
+    Dim ws As Object
+    Set ws = AnchorCell.Worksheet
+    If ws.ProtectContents Then
+        Err.Raise 1004, "cDataFrame.AppendToRange", _
+            "Cannot write to protected worksheet '" & ws.Name & "'."
+    End If
+
+    Dim curReg As Object
+    Set curReg = AnchorCell.CurrentRegion
+    Dim hasExisting As Boolean
+    hasExisting = (Not IsEmpty(AnchorCell.Value2)) Or (curReg.Rows.Count > 1)
+
+    If Not hasExisting Then
+        Set AppendToRange = ToRangeAsObject(AnchorCell, IncludeHeadersIfEmpty)
+    Else
+        Dim nextRow As Long
+        nextRow = curReg.Row + curReg.Rows.Count
+        Set AppendToRange = ToRangeAsObject(ws.Cells(nextRow, AnchorCell.Column), False)
+    End If
+End Function
+
+' Writes large DataFrames in fixed-size row chunks to prevent Excel COM memory/array failures.
+Public Function ToRangeChunked(ByVal TargetCell As Object, _
+                               Optional ByVal IncludeHeaders As Boolean = True, _
+                               Optional ByVal ChunkSize As Long = 5000) As Object
+    If TargetCell Is Nothing Then
+        Err.Raise 91, "cDataFrame.ToRangeChunked", "TargetCell cannot be Nothing."
+    End If
+    If ChunkSize < 1 Then
+        Err.Raise 5, "cDataFrame.ToRangeChunked", "ChunkSize must be >= 1."
+    End If
+    If mCols.Count = 0 Then Exit Function
+
+    Dim ws As Object
+    Set ws = TargetCell.Worksheet
+    If ws.ProtectContents Then
+        Err.Raise 1004, "cDataFrame.ToRangeChunked", _
+            "Cannot write to protected worksheet '" & ws.Name & "'."
+    End If
+
+    Dim colCnt As Long
+    colCnt = mCols.Count
+    Dim keys As Variant
+    keys = mCols.Keys
+
+    Dim curRowOffset As Long, c As Long
+    curRowOffset = 0
+
+    If IncludeHeaders Then
+        Dim hdrArr() As Variant
+        ReDim hdrArr(1 To 1, 1 To colCnt)
+        For c = 1 To colCnt
+            hdrArr(1, c) = keys(c - 1)
+        Next c
+        TargetCell.Resize(1, colCnt).Value2 = hdrArr
+        curRowOffset = 1
+    End If
+
+    Dim startIdx As Long, endIdx As Long, batchLen As Long, r As Long, col As cColumn
+    Dim chunkArr() As Variant
+    startIdx = 1
+    Do While startIdx <= mRowCount
+        endIdx = startIdx + ChunkSize - 1
+        If endIdx > mRowCount Then endIdx = mRowCount
+        batchLen = endIdx - startIdx + 1
+
+        ReDim chunkArr(1 To batchLen, 1 To colCnt)
+        For c = 1 To colCnt
+            Set col = mCols.Item(keys(c - 1))
+            For r = 1 To batchLen
+                chunkArr(r, c) = col.Item(startIdx + r - 1)
+            Next r
+        Next c
+
+        TargetCell.Offset(curRowOffset + startIdx - 1, 0).Resize(batchLen, colCnt).Value2 = chunkArr
+        startIdx = endIdx + 1
+    Loop
+
+    Dim totalRows As Long
+    totalRows = mRowCount + curRowOffset
+    If totalRows > 0 Then
+        Set ToRangeChunked = TargetCell.Resize(totalRows, colCnt)
+    End If
+End Function
+
+' --- Private Helpers for Get Data & Range Operations ---
+
+Private Function ReadRangeTo2D(ByVal SourceRange As Object, _
+                               ByVal FillMerged As Boolean) As Variant
+    Dim vData As Variant
+    On Error Resume Next
+    vData = SourceRange.Value2
+    If Err.Number <> 0 Then
+        Err.Clear
+        vData = SourceRange.Value
+    End If
+    On Error GoTo 0
+
+    If Not IsArray(vData) Then
+        Dim singleCell(1 To 1, 1 To 1) As Variant
+        singleCell(1, 1) = vData
+        vData = singleCell
+    End If
+
+    If FillMerged Then
+        Dim hasMerged As Boolean
+        hasMerged = IsNull(SourceRange.MergeCells) Or (SourceRange.MergeCells = True)
+        If hasMerged Then
+            Dim r As Long, c As Long, rCnt As Long, cCnt As Long
+            rCnt = UBound(vData, 1) - LBound(vData, 1) + 1
+            cCnt = UBound(vData, 2) - LBound(vData, 2) + 1
+            Dim cellObj As Object
+            For r = 1 To rCnt
+                For c = 1 To cCnt
+                    Set cellObj = SourceRange.Cells(r, c)
+                    If cellObj.MergeCells Then
+                        vData(LBound(vData, 1) + r - 1, LBound(vData, 2) + c - 1) = _
+                            cellObj.MergeArea.Cells(1, 1).Value2
+                    End If
+                Next c
+            Next r
+        End If
+    End If
+
+    ReadRangeTo2D = vData
+End Function
+
+Private Function LoadFromRangeCellProp(ByVal SourceRange As Object, _
+                                       ByVal PropMode As String, _
+                                       ByVal HasHeaders As Boolean) As cDataFrame
+    If SourceRange Is Nothing Then
+        Err.Raise 91, "cDataFrame.LoadFromRangeCellProp", "SourceRange cannot be Nothing."
+    End If
+
+    Dim rCnt As Long, cCnt As Long, r As Long, c As Long
+    rCnt = SourceRange.Rows.Count
+    cCnt = SourceRange.Columns.Count
+
+    Dim vData() As Variant
+    ReDim vData(1 To rCnt, 1 To cCnt)
+    Dim cellObj As Object
+    For r = 1 To rCnt
+        For c = 1 To cCnt
+            Set cellObj = SourceRange.Cells(r, c)
+            If PropMode = "TEXT" Then
+                vData(r, c) = CStr(cellObj.Text)
+            Else
+                vData(r, c) = cellObj.Formula
+            End If
+        Next c
+    Next r
+
+    Set LoadFromRangeCellProp = LoadFromVariant2D(vData, HasHeaders)
+End Function
+
+Private Function LoadFromVariant2D(ByRef vData As Variant, _
+                                   ByVal HasHeaders As Boolean, _
+                                   Optional ByVal ExplicitHeaders As Variant) As cDataFrame
+    Dim rLb As Long, rUb As Long, cLb As Long, cUb As Long
+    rLb = LBound(vData, 1): rUb = UBound(vData, 1)
+    cLb = LBound(vData, 2): cUb = UBound(vData, 2)
+
+    Dim totalRows As Long, totalCols As Long
+    totalRows = rUb - rLb + 1
+    totalCols = cUb - cLb + 1
+
+    mCols.RemoveAll
+    mRowCount = 0
+    Set mRowIndexMap = Nothing
+    mIndexColumnName = ""
+    mIndexDirty = False
+
+    Dim useExplicit As Boolean
+    useExplicit = Not IsMissing(ExplicitHeaders)
+    If useExplicit Then
+        If IsEmpty(ExplicitHeaders) Then useExplicit = False
+    End If
+
+    Dim dataStartRow As Long, dataRowCount As Long
+    If HasHeaders And Not useExplicit Then
+        dataStartRow = rLb + 1
+        dataRowCount = totalRows - 1
+        If dataRowCount < 0 Then dataRowCount = 0
+    Else
+        dataStartRow = rLb
+        dataRowCount = totalRows
+    End If
+
+    mRowCount = dataRowCount
+
+    Dim c As Long, r As Long, headerName As String, col As cColumn
+    Dim rawHdr As Variant, uniqueHeader As String, dupCount As Long
+    Dim expLb As Long
+    If useExplicit And IsArray(ExplicitHeaders) Then expLb = LBound(ExplicitHeaders)
+
+    For c = 1 To totalCols
+        If useExplicit Then
+            If IsArray(ExplicitHeaders) Then
+                If expLb + c - 1 <= UBound(ExplicitHeaders) Then
+                    headerName = Trim$(CStr(ExplicitHeaders(expLb + c - 1)))
+                Else
+                    headerName = "Column_" & c
+                End If
+            ElseIf IsObject(ExplicitHeaders) Then
+                If c <= ExplicitHeaders.Count Then
+                    headerName = Trim$(CStr(ExplicitHeaders(c)))
+                Else
+                    headerName = "Column_" & c
+                End If
+            Else
+                headerName = "Column_" & c
+            End If
+            If Len(headerName) = 0 Then headerName = "Column_" & c
+        ElseIf HasHeaders Then
+            rawHdr = vData(rLb, cLb + c - 1)
+            If IsError(rawHdr) Then
+                headerName = "Column_Err_" & c
+            ElseIf IsNull(rawHdr) Or IsEmpty(rawHdr) Then
+                headerName = "Column_" & c
+            Else
+                headerName = Trim$(CStr(rawHdr))
+                If Len(headerName) = 0 Then headerName = "Column_" & c
+            End If
+        Else
+            headerName = "Column_" & c
+        End If
+
+        uniqueHeader = headerName
+        dupCount = 1
+        Do While mCols.Exists(uniqueHeader)
+            dupCount = dupCount + 1
+            uniqueHeader = headerName & "_" & dupCount
+        Loop
+
+        Set col = New cColumn
+        col.Name = uniqueHeader
+        col.EnsureCapacity dataRowCount
+        col.SetCount dataRowCount
+
+        If dataRowCount > 0 Then
+            For r = 1 To dataRowCount
+                col.Item(r) = vData(dataStartRow + r - 1, cLb + c - 1)
+            Next r
+        End If
+
+        mCols.Add uniqueHeader, col
+    Next c
+
+    Set LoadFromVariant2D = Me
+End Function
+
+Private Sub CollectFolderFiles(ByVal fsoFolder As Object, _
+                               ByVal Pattern As String, _
+                               ByVal Recursive As Boolean, _
+                               ByVal Results As Collection)
+    Dim f As Object, subF As Object
+    Dim patLower As String
+    patLower = LCase$(Pattern)
+    For Each f In fsoFolder.Files
+        If LCase$(f.Name) Like patLower Then
+            Results.Add f.Path
+        End If
+    Next f
+    If Recursive Then
+        For Each subF In fsoFolder.SubFolders
+            CollectFolderFiles subF, Pattern, True, Results
+        Next subF
+    End If
+End Sub
+
+Private Sub AddConstantColumnToDF(ByVal df As cDataFrame, _
+                                  ByVal BaseName As String, _
+                                  ByVal ConstVal As Variant)
+    Dim colName As String, idx As Long
+    colName = BaseName
+    idx = 1
+    Do While df.HasColumn(colName)
+        idx = idx + 1
+        colName = BaseName & "_" & idx
+    Loop
+    Dim newCol As cColumn
+    Set newCol = df.AddColumn(colName)
+    Dim r As Long
+    For r = 1 To df.RowCount
+        newCol.Item(r) = ConstVal
+    Next r
+End Sub
+
+Private Sub AppendDataFrameRows(ByVal srcDf As cDataFrame)
+    If srcDf.ColumnCount = 0 Then Exit Sub
+
+    Dim srcKeys As Variant, k As Variant, colName As String
+    srcKeys = srcDf.ColumnNames
+
+    If mCols.Count = 0 Then
+        For Each k In srcKeys
+            AddColumn CStr(k)
+        Next k
+    Else
+        For Each k In srcKeys
+            colName = CStr(k)
+            If Not mCols.Exists(colName) Then
+                AddColumn colName
+            End If
+        Next k
+    End If
+
+    If srcDf.RowCount = 0 Then Exit Sub
+
+    Dim oldRows As Long, addRows As Long, r As Long
+    oldRows = mRowCount
+    addRows = srcDf.RowCount
+    mRowCount = oldRows + addRows
+
+    Dim dstCol As cColumn, srcCol As cColumn
+    For Each k In mCols.Keys
+        colName = CStr(k)
+        Set dstCol = mCols.Item(colName)
+        dstCol.EnsureCapacity mRowCount
+        dstCol.SetCount mRowCount
+        If srcDf.HasColumn(colName) Then
+            Set srcCol = srcDf.Column(colName)
+            For r = 1 To addRows
+                dstCol.Item(oldRows + r) = srcCol.Item(r)
+            Next r
+        End If
+    Next k
+    mIndexDirty = True
+End Sub

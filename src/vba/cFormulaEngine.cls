@@ -2598,3 +2598,17 @@ Private Function ExpandColumnRangeTokens(ByVal Expr As String) As String
 
     ExpandColumnRangeTokens = res
 End Function
+
+' Converts formulas in TargetRange to static values in-place without touching Clipboard.
+Public Function ConvertRangeToValues(ByVal TargetRange As Object) As cFormulaEngine
+    If TargetRange Is Nothing Then
+        Err.Raise 91, "cFormulaEngine.ConvertRangeToValues", "TargetRange cannot be Nothing."
+    End If
+    If TargetRange.Worksheet.ProtectContents Then
+        Err.Raise 1004, "cFormulaEngine.ConvertRangeToValues", _
+            "Cannot modify protected worksheet '" & TargetRange.Worksheet.Name & "'."
+    End If
+
+    TargetRange.Value2 = TargetRange.Value2
+    Set ConvertRangeToValues = Me
+End Function
