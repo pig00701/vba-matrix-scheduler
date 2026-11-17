@@ -94,6 +94,7 @@ Public Function RunAllTests() As String
     Test_CrossReferenceMatrix
     Test_MatrixEnhancements
     Test_SparseMatrixOptimization
+    Test_ThemeEngineAndModernBorders
 
     Dim tElapsed As Double
     tElapsed = Timer - tStart
@@ -4714,4 +4715,114 @@ TestFail:
     ThisWorkbook.Application.DisplayAlerts = True
     On Error GoTo 0
     RecordFailure "Test_SparseMatrixOptimization", failErr
+End Sub
+
+' ------------------------------------------------------------------------------
+' Test 52: Theme Engine & Modern Borders Suite
+' ------------------------------------------------------------------------------
+Private Sub Test_ThemeEngineAndModernBorders()
+    On Error GoTo TestFail
+    LogPrint "[TEST 52] Theme Engine & Modern Borders Suite..."
+
+    Dim xlApp As Object
+    Set xlApp = ThisWorkbook.Application
+    xlApp.DisplayAlerts = False
+    On Error Resume Next
+    ThisWorkbook.Worksheets("ThemeBorderTest").Delete
+    On Error GoTo TestFail
+
+    Dim ws As Object
+    Set ws = ThisWorkbook.Worksheets.Add(After:=ThisWorkbook.Worksheets(ThisWorkbook.Worksheets.Count))
+    ws.Name = "ThemeBorderTest"
+
+    ' --------------------------------------------------------------------------
+    ' 52.1: RegisterTheme & ApplyFullTheme
+    ' --------------------------------------------------------------------------
+    LogPrint "  [52.1] RegisterTheme & ApplyFullTheme..."
+    Dim tGrid(1 To 4, 1 To 3) As Variant
+    tGrid(1, 1) = "ID":    tGrid(1, 2) = "Department": tGrid(1, 3) = "Budget"
+    tGrid(2, 1) = "D-101": tGrid(2, 2) = "Engineering": tGrid(2, 3) = 500000#
+    tGrid(3, 1) = "D-102": tGrid(3, 2) = "Marketing":   tGrid(3, 3) = 250000#
+    tGrid(4, 1) = "D-103": tGrid(4, 2) = "Operations":  tGrid(4, 3) = 150000#
+    ws.Range("B5:D8").Value = tGrid
+    LogPrint "   a. Range populated"
+
+    Dim styler As New cTableStyler
+    styler.AttachRange ws.Range("B5:D8"), HasHeaders:=True
+    LogPrint "   b. AttachRange done"
+
+    ' Register custom theme
+    Dim customH As Long, customZ As Long, customB As Long
+    customH = RGB(20, 45, 85)
+    customZ = RGB(242, 246, 252)
+    customB = RGB(190, 210, 235)
+    styler.RegisterTheme "ACME_CORP", HeaderBgColor:=customH, HeaderFontColor:=RGB(255, 255, 255), _
+                         ZebraColor:=customZ, BorderColor:=customB, AccentColor:=RGB(0, 160, 255)
+    LogPrint "   c. RegisterTheme done"
+
+    ' Apply full theme in one call
+    Call styler.ApplyFullTheme("ACME_CORP", True, True, True)
+    LogPrint "   d. ApplyFullTheme done"
+
+    AssertEqual ws.Range("B5").Interior.Color, customH, "Custom theme header color applied"
+    AssertEqual ws.Range("B5").Font.Color, RGB(255, 255, 255), "Custom theme font color applied"
+    AssertEqual ws.Range("B7").Interior.Color, customZ, "Custom theme zebra background applied to even row"
+
+    ' --------------------------------------------------------------------------
+    ' 52.2: Built-in Executive Themes (CHARCOAL_GOLD, MIDNIGHT, NORDIC_TEAL, etc.)
+    ' --------------------------------------------------------------------------
+    LogPrint "  [52.2] Built-in Executive Themes..."
+    Dim hBg As Long, hFont As Long, zBg As Long, bColor As Long, aColor As Long
+    styler.GetThemeColors "CHARCOAL_GOLD", hBg, hFont, zBg, bColor, aColor
+    AssertEqual hBg, RGB(44, 62, 80), "CHARCOAL_GOLD header is RGB(44, 62, 80)"
+    AssertEqual aColor, RGB(212, 175, 55), "CHARCOAL_GOLD accent is gold RGB(212, 175, 55)"
+
+    styler.GetThemeColors "NORDIC_TEAL", hBg, hFont, zBg, bColor, aColor
+    AssertEqual hBg, RGB(0, 91, 96), "NORDIC_TEAL header is RGB(0, 91, 96)"
+
+    styler.GetThemeColors "MIDNIGHT", hBg, hFont, zBg, bColor, aColor
+    AssertEqual hBg, RGB(26, 29, 32), "MIDNIGHT header is RGB(26, 29, 32)"
+
+    ' --------------------------------------------------------------------------
+    ' 52.3: Modern Borders Suite (ApplyModernBorders, ApplyOuterBorder, ClearBorders)
+    ' --------------------------------------------------------------------------
+    LogPrint "  [52.3] Modern Borders Suite..."
+    ' Test ApplyModernBorders: Outer border weight xlMedium (-4138), header bottom border weight xlMedium (-4138), inside horizontal weight xlThin (2)
+    styler.ApplyModernBorders BorderColor:=customB, HeaderUnderlineWeight:=-4138, OuterBoxWeight:=-4138, ShowVerticalBorders:=False
+
+    Const xlEdgeTop As Long = 8
+    Const xlEdgeBottom As Long = 9
+    Const xlInsideVertical As Long = 11
+    Const xlInsideHorizontal As Long = 12
+    Const xlLineStyleNone As Long = -4142
+    Const xlMedium As Long = -4138
+    Const xlThin As Long = 2
+    Const xlThick As Long = 4
+
+    AssertEqual ws.Range("B5:D8").Borders(xlEdgeTop).Weight, xlMedium, "Outer top border weight is xlMedium (-4138)"
+    AssertEqual ws.Range("B5:D5").Borders(xlEdgeBottom).Weight, xlMedium, "Header underline border weight is xlMedium (-4138)"
+    AssertEqual ws.Range("B6:D8").Borders(xlInsideHorizontal).Weight, xlThin, "Inside horizontal divider weight is xlThin (2)"
+    AssertEqual ws.Range("B5:D8").Borders(xlInsideVertical).LineStyle, xlLineStyleNone, "Inside vertical border is None for modern clean look"
+
+    ' Test ApplyOuterBorder
+    LogPrint "  [52.4] ApplyOuterBorder & ClearBorders..."
+    styler.ApplyOuterBorder BorderColor:=RGB(0, 0, 0), Weight:=xlThick
+    AssertEqual ws.Range("B5:D8").Borders(xlEdgeTop).Weight, xlThick, "ApplyOuterBorder set outer weight to xlThick (4)"
+
+    ' Test ClearBorders
+    styler.ClearBorders
+    AssertEqual ws.Range("B5:D8").Borders(xlEdgeTop).LineStyle, xlLineStyleNone, "ClearBorders removed all borders"
+
+    On Error Resume Next
+    ThisWorkbook.Worksheets("ThemeBorderTest").Delete
+    On Error GoTo 0
+    Exit Sub
+
+TestFail:
+    Dim failErr As String
+    failErr = Err.Description
+    On Error Resume Next
+    ThisWorkbook.Worksheets("ThemeBorderTest").Delete
+    On Error GoTo 0
+    RecordFailure "Test_ThemeEngineAndModernBorders", failErr
 End Sub

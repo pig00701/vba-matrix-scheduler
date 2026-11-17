@@ -193,7 +193,13 @@ Set dfSkills = df.Explode("skills", ",")
 | :--- | :--- | :--- |
 | `Attach(TopLeftCell, DataFrame, [HasHeaders])` | `Range, cDataFrame` | ผูก Styler เข้ากับตาราง DataFrame บนแผ่นงาน |
 | `AttachRange(SourceRange, [HasHeaders])` | `Range` | ผูก Styler เข้ากับ Range ใดๆ บนชีตโดยตรง (ไม่ต้องมี DataFrame) |
-| `ApplyTheme([ThemeName="NAVY"])` | `"NAVY"`, `"SLATE"`, `"EMERALD"`, `"MINIMAL"` | เปลี่ยนชุดสีตารางและฟอนต์มาตรฐาน |
+| `ApplyTheme([ThemeName="NAVY"])` | `"NAVY"`, `"SLATE"`, `"EMERALD"`, `"MIDNIGHT"`, `"NORDIC_TEAL"`, `"CHARCOAL_GOLD"`, `"CRIMSON"`, `"INDIGO"`, `"MINIMAL"` | เปลี่ยนชุดสีตารางและฟอนต์มาตรฐาน |
+| `RegisterTheme(ThemeName, HeaderBgColor, [HeaderFontColor], [ZebraColor], [BorderColor], [AccentColor])` | `Name, RGB...` | ลงทะเบียนชุดสีองค์กรแบบกำหนดเอง (Custom Corporate Theme) บันทึกลงในพจนานุกรมธีม |
+| `GetThemeColors(ThemeName, ByRef HeaderBg, ByRef HeaderFont, ByRef ZebraBg, ByRef BorderColor, ByRef AccentColor)` | `Name, ByRef Long...` | ดึงรหัสสี 5 องค์ประกอบของธีม (ทั้งแบบ Built-in และ Custom Registered) |
+| `ApplyFullTheme([ThemeName="NAVY"], [ApplyZebra=True], [ApplyBorders=True], [ModernBorders=True])` | `Name, Boolean...` | ใช้งานธีมแบบครบวงจรในคำสั่งเดียว (ปรับหัวตาราง, แถบสลับสี Zebra, และเส้นขอบสไตล์โมเดิร์น) |
+| `ApplyModernBorders([BorderColor], [HeaderUnderlineWeight], [OuterBoxWeight], [ShowVerticalBorders=False])` | `BorderColor, Weights` | ตีเส้นขอบตารางสไตล์โมเดิร์นสะอาดตา: กรอบนอกหนา/ปานกลาง, เส้นขีดใต้หัวตารางเด่นชัด, เส้นแบ่งแถวด้านในบางๆ, และไม่มีเส้นแนวตั้งรบกวนสายตา |
+| `ApplyOuterBorder([BorderColor=0], [Weight=xlMedium])` | `BorderColor, Weight` | ตีเฉพาะเส้นกรอบล้อมรอบขอบนอกของตาราง (Box Perimeter Frame) |
+| `ClearBorders()` | - | ล้างเส้นขอบตารางทั้งหมดออกอย่างหมดจด |
 | `FormatColumn(ColumnKey, FormatString)` | `ColKey, NumberFormat` | กำหนดรูปแบบตัวเลข เช่น `"$#,##0.00"`, `"0.0%"` |
 | `FormatAsCurrency(ColumnKeyOrPattern, [CurrencySymbol="$"])` | `ColKey, CurrencySymbol` | ฟอร์แมตสกุลเงินแบบอัตโนมัติ |
 | `FormatAsPercent(ColumnKeyOrPattern, [Decimals=1])` | `ColKey, Decimals` | ฟอร์แมตเปอร์เซ็นต์แบบอัตโนมัติ |

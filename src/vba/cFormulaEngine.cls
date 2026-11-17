@@ -2549,7 +2549,7 @@ Private Function ResolveSpillRangeArg(ByVal ColOrRange As Variant) As String
     If IsNumeric(ColOrRange) Then
         Dim cIdxNum As Long
         cIdxNum = CLng(ColOrRange)
-        If cIdxNum >= 1 And cIdxNum <= mColCount Then
+        If cIdxNum >= 1 And cIdxNum <= mColumnCount Then
             Dim letNum As String
             letNum = ColIndexToLetter(mDataBodyRange.Column + cIdxNum - 1)
             ResolveSpillRangeArg = letNum & CStr(firstRow) & ":" & letNum & CStr(lastRow)

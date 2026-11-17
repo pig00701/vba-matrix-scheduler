@@ -957,6 +957,40 @@ Call dfSparse.ToSparseMatrixRange(ws.Range("B5"), "Employee", "Date", "LoggedHou
                                   IncludeRowTotals:=True, IncludeColTotals:=True)
 ```
 
+### Example 26: Corporate Theme Engine & Modern Border Styling Suite
+
+```vb
+Dim styler As New cTableStyler
+styler.AttachRange ws.Range("B5:H25"), HasHeaders:=True
+
+' --- 1. Dynamic Corporate Brand Theme Registration ---
+' Register your company's official corporate color palette:
+styler.RegisterTheme "ACME_CORP", _
+                     HeaderBgColor:=RGB(20, 45, 85), _
+                     HeaderFontColor:=RGB(255, 255, 255), _
+                     ZebraColor:=RGB(242, 246, 252), _
+                     BorderColor:=RGB(190, 210, 235), _
+                     AccentColor:=RGB(0, 160, 255)
+
+' --- 2. Unified 1-Line Full Theme Application ---
+' Automatically styles header, alternating zebra rows, and modern clean borders:
+styler.ApplyFullTheme "ACME_CORP", ApplyZebra:=True, ApplyBorders:=True, ModernBorders:=True
+
+' --- 3. Built-In Executive Themes ---
+' Choose from built-in palettes: NAVY, SLATE, EMERALD, MIDNIGHT, NORDIC_TEAL, CHARCOAL_GOLD, CRIMSON, INDIGO, MINIMAL
+styler.ApplyFullTheme "CHARCOAL_GOLD"
+
+' --- 4. Modern Border Framing Suite ---
+' Professional look: Medium outer frame, prominent header underline, subtle inside row dividers, no vertical bars:
+styler.ApplyModernBorders BorderColor:=RGB(217, 225, 232), HeaderUnderlineWeight:=-4138, OuterBoxWeight:=-4138, ShowVerticalBorders:=False
+
+' Or apply a prominent outer perimeter box frame:
+styler.ApplyOuterBorder BorderColor:=RGB(44, 62, 80), Weight:=-4138
+
+' Reset/clear borders cleanly:
+styler.ClearBorders
+```
+
 ---
 
 ## 6. End-to-End Demo Use-Cases (`mDemoWorkflow.bas`)

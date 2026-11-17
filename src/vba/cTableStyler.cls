@@ -38,6 +38,8 @@ Private mPrevScreenUpdating As Boolean ' Stored ScreenUpdating state
 Private mPrevCalculation As Long       ' Stored Calculation state
 Private mPrevEnableEvents As Boolean   ' Stored EnableEvents state
 Private mPrevDisplayAlerts As Boolean  ' Stored DisplayAlerts state
+Private mCustomThemes As Object        ' Scripting.Dictionary (ThemeName -> Array(HeaderBg, HeaderFont, ZebraBg, BorderColor, AccentColor))
+Private mListObject As Object          ' Excel.ListObject (cached table reference if converted)
 
 ' ------------------------------------------------------------------------------
 ' Lifecycle
@@ -46,6 +48,8 @@ Private mPrevDisplayAlerts As Boolean  ' Stored DisplayAlerts state
 Private Sub Class_Initialize()
     Set mColIndexMap = CreateObject("Scripting.Dictionary")
     mColIndexMap.CompareMode = 1      ' vbTextCompare (default)
+    Set mCustomThemes = CreateObject("Scripting.Dictionary")
+    mCustomThemes.CompareMode = 1
     mRowCount = 0
     mColumnCount = 0
     mHasHeaders = True
@@ -60,6 +64,7 @@ Private Sub Class_Initialize()
     Set mTableRange = Nothing
     Set mHeaderRange = Nothing
     Set mDataBodyRange = Nothing
+    Set mListObject = Nothing
 End Sub
 
 Private Sub Class_Terminate()
@@ -67,11 +72,13 @@ Private Sub Class_Terminate()
         EndUpdate
     End If
     Set mColIndexMap = Nothing
+    Set mCustomThemes = Nothing
     Set mTopLeftCell = Nothing
     Set mWorksheet = Nothing
     Set mTableRange = Nothing
     Set mHeaderRange = Nothing
     Set mDataBodyRange = Nothing
+    Set mListObject = Nothing
 End Sub
 
 ' ------------------------------------------------------------------------------
@@ -331,6 +338,163 @@ End Function
 ' Fluent Styling Methods
 ' ------------------------------------------------------------------------------
 
+' Resolves 5-element color palette (HeaderBg, HeaderFont, ZebraBg, BorderColor, AccentColor)
+' for any built-in or custom registered theme.
+Public Sub GetThemeColors(ByVal ThemeName As String, _
+                          ByRef OutHeaderBg As Long, _
+                          ByRef OutHeaderFont As Long, _
+                          ByRef OutZebraBg As Long, _
+                          ByRef OutBorderColor As Long, _
+                          ByRef OutAccentColor As Long)
+    Dim ucName As String
+    ucName = UCase$(Trim$(ThemeName))
+
+    If Not mCustomThemes Is Nothing Then
+        If mCustomThemes.Exists(ucName) Then
+            Dim cArr As Variant
+            cArr = mCustomThemes.Item(ucName)
+            OutHeaderBg = CLng(cArr(0))
+            OutHeaderFont = CLng(cArr(1))
+            OutZebraBg = CLng(cArr(2))
+            OutBorderColor = CLng(cArr(3))
+            OutAccentColor = CLng(cArr(4))
+            Exit Sub
+        End If
+    End If
+
+    Select Case ucName
+        Case "NAVY", "CORPORATE_NAVY"
+            OutHeaderBg = RGB(31, 78, 121)
+            OutHeaderFont = RGB(255, 255, 255)
+            OutZebraBg = RGB(242, 247, 250)
+            OutBorderColor = RGB(217, 225, 232)
+            OutAccentColor = RGB(47, 85, 151)
+
+        Case "SLATE", "MODERN_CHARCOAL", "CHARCOAL"
+            OutHeaderBg = RGB(52, 73, 94)
+            OutHeaderFont = RGB(255, 255, 255)
+            OutZebraBg = RGB(248, 249, 250)
+            OutBorderColor = RGB(226, 230, 234)
+            OutAccentColor = RGB(65, 91, 118)
+
+        Case "EMERALD", "GREEN", "FOREST"
+            OutHeaderBg = RGB(39, 110, 80)
+            OutHeaderFont = RGB(255, 255, 255)
+            OutZebraBg = RGB(240, 247, 244)
+            OutBorderColor = RGB(210, 229, 220)
+            OutAccentColor = RGB(46, 204, 113)
+
+        Case "MIDNIGHT", "DARK"
+            OutHeaderBg = RGB(26, 29, 32)
+            OutHeaderFont = RGB(255, 255, 255)
+            OutZebraBg = RGB(244, 245, 247)
+            OutBorderColor = RGB(222, 226, 230)
+            OutAccentColor = RGB(52, 152, 219)
+
+        Case "NORDIC_TEAL"
+            OutHeaderBg = RGB(0, 91, 96)
+            OutHeaderFont = RGB(255, 255, 255)
+            OutZebraBg = RGB(235, 245, 245)
+            OutBorderColor = RGB(198, 226, 227)
+            OutAccentColor = RGB(0, 128, 128)
+
+        Case "TEAL"
+            OutHeaderBg = RGB(0, 128, 128)
+            OutHeaderFont = RGB(255, 255, 255)
+            OutZebraBg = RGB(235, 245, 245)
+            OutBorderColor = RGB(198, 226, 227)
+            OutAccentColor = RGB(0, 128, 128)
+
+        Case "CHARCOAL_GOLD", "GOLD", "EXECUTIVE_GOLD"
+            OutHeaderBg = RGB(44, 62, 80)
+            OutHeaderFont = RGB(255, 255, 255)
+            OutZebraBg = RGB(253, 251, 247)
+            OutBorderColor = RGB(232, 228, 218)
+            OutAccentColor = RGB(212, 175, 55)
+
+        Case "CRIMSON", "BURGUNDY", "RUBY"
+            OutHeaderBg = RGB(128, 0, 32)
+            OutHeaderFont = RGB(255, 255, 255)
+            OutZebraBg = RGB(253, 242, 242)
+            OutBorderColor = RGB(236, 200, 200)
+            OutAccentColor = RGB(231, 76, 60)
+
+        Case "INDIGO"
+            OutHeaderBg = RGB(63, 81, 181)
+            OutHeaderFont = RGB(255, 255, 255)
+            OutZebraBg = RGB(245, 246, 253)
+            OutBorderColor = RGB(218, 222, 245)
+            OutAccentColor = RGB(92, 107, 192)
+
+        Case "MINIMAL", "CLASSIC_GRAY", "MONOCHROME", "MONO"
+            OutHeaderBg = RGB(220, 224, 230)
+            OutHeaderFont = RGB(40, 40, 40)
+            OutZebraBg = RGB(248, 249, 250)
+            OutBorderColor = RGB(206, 212, 218)
+            OutAccentColor = RGB(73, 80, 87)
+
+        Case Else
+            OutHeaderBg = RGB(31, 78, 121)
+            OutHeaderFont = RGB(255, 255, 255)
+            OutZebraBg = RGB(242, 247, 250)
+            OutBorderColor = RGB(217, 225, 232)
+            OutAccentColor = RGB(47, 85, 151)
+    End Select
+End Sub
+
+' Registers a custom corporate or brand color theme dynamically.
+Public Function RegisterTheme(ByVal ThemeName As String, _
+                              ByVal HeaderBgColor As Long, _
+                              Optional ByVal HeaderFontColor As Long = 16777215, _
+                              Optional ByVal ZebraColor As Long = 16316664, _
+                              Optional ByVal BorderColor As Long = 14277081, _
+                              Optional ByVal AccentColor As Long = -1) As cTableStyler
+    Dim cleanName As String
+    cleanName = UCase$(Trim$(ThemeName))
+    If Len(cleanName) = 0 Then
+        Err.Raise 5, "cTableStyler.RegisterTheme", "ThemeName cannot be empty."
+    End If
+
+    If mCustomThemes Is Nothing Then
+        Set mCustomThemes = CreateObject("Scripting.Dictionary")
+        mCustomThemes.CompareMode = 1
+    End If
+
+    Dim actualAccent As Long
+    If AccentColor < 0 Then actualAccent = HeaderBgColor Else actualAccent = AccentColor
+
+    mCustomThemes.Item(cleanName) = Array(HeaderBgColor, HeaderFontColor, ZebraColor, BorderColor, actualAccent)
+    Set RegisterTheme = Me
+End Function
+
+' Applies an entire unified visual theme (Header, Zebra stripes, and Modern borders) in one call.
+Public Function ApplyFullTheme(Optional ByVal ThemeName As String = "NAVY", _
+                               Optional ByVal ApplyZebra As Boolean = True, _
+                               Optional ByVal ApplyBorders As Boolean = True, _
+                               Optional ByVal ModernBorders As Boolean = True) As cTableStyler
+    Dim hBg As Long, hFont As Long, zBg As Long, bColor As Long, accColor As Long
+    GetThemeColors ThemeName, hBg, hFont, zBg, bColor, accColor
+
+    ' 1. Header
+    Call ApplyTheme(ThemeName, hBg, hFont)
+
+    ' 2. Zebra
+    If ApplyZebra And mRowCount > 1 Then
+        Call ApplyZebraStripes(zBg)
+    End If
+
+    ' 3. Borders
+    If ApplyBorders And Not mTableRange Is Nothing Then
+        If ModernBorders Then
+            Call Me.ApplyModernBorders(bColor, -4138, -4138, False)
+        Else
+            Call Me.ApplyBorders(bColor)
+        End If
+    End If
+
+    Set ApplyFullTheme = Me
+End Function
+
 ' Applies pre-configured theme colors or custom RGB values to the header row in 1 COM call.
 Public Function ApplyTheme(Optional ByVal ThemeName As String = "NAVY", _
                            Optional ByVal CustomHeaderBgColor As Long = -1, _
@@ -355,35 +519,8 @@ Public Function ApplyTheme(Optional ByVal ThemeName As String = "NAVY", _
             fontColor = RGB(255, 255, 255)
         End If
     Else
-        Select Case UCase$(Trim$(ThemeName))
-            Case "NAVY", "CORPORATE_NAVY"
-                headerBgColor = RGB(31, 78, 121)
-                fontColor = RGB(255, 255, 255)
-            Case "SLATE", "MODERN_CHARCOAL"
-                headerBgColor = RGB(52, 73, 94)
-                fontColor = RGB(255, 255, 255)
-            Case "EMERALD", "GREEN"
-                headerBgColor = RGB(39, 110, 80)
-                fontColor = RGB(255, 255, 255)
-            Case "MINIMAL", "CLASSIC_GRAY"
-                headerBgColor = RGB(220, 224, 230)
-                fontColor = RGB(40, 40, 40)
-            Case "TEAL"
-                headerBgColor = RGB(0, 128, 128)
-                fontColor = RGB(255, 255, 255)
-            Case "BURGUNDY"
-                headerBgColor = RGB(128, 0, 32)
-                fontColor = RGB(255, 255, 255)
-            Case "INDIGO"
-                headerBgColor = RGB(63, 81, 181)
-                fontColor = RGB(255, 255, 255)
-            Case "DARK_GRAY"
-                headerBgColor = RGB(64, 64, 64)
-                fontColor = RGB(255, 255, 255)
-            Case Else
-                headerBgColor = RGB(31, 78, 121)
-                fontColor = RGB(255, 255, 255)
-        End Select
+        Dim zDum As Long, bDum As Long, aDum As Long
+        GetThemeColors ThemeName, headerBgColor, fontColor, zDum, bDum, aDum
     End If
 
     With mHeaderRange
@@ -499,6 +636,99 @@ Public Function ApplyBorders(Optional ByVal BorderColor As Long = 14277081, _
     End If
 
     Set ApplyBorders = Me
+End Function
+
+' Applies modern, clean executive borders: thick/medium outer frame, prominent header underline,
+' subtle horizontal row dividers, and no vertical bars (optional) for optimal readability.
+Public Function ApplyModernBorders(Optional ByVal BorderColor As Long = -1, _
+                                   Optional ByVal HeaderUnderlineWeight As Long = -4138, _
+                                   Optional ByVal OuterBoxWeight As Long = -4138, _
+                                   Optional ByVal ShowVerticalBorders As Boolean = False) As cTableStyler
+    If mTableRange Is Nothing Then
+        Set ApplyModernBorders = Me
+        Exit Function
+    End If
+
+    Dim actualColor As Long
+    If BorderColor < 0 Then actualColor = RGB(217, 225, 232) Else actualColor = BorderColor
+
+    Dim actOuter As Long, actUnderline As Long
+    If OuterBoxWeight = 3 Then actOuter = -4138 Else actOuter = OuterBoxWeight
+    If HeaderUnderlineWeight = 3 Then actUnderline = -4138 Else actUnderline = HeaderUnderlineWeight
+
+    Const xlInsideVertical As Long = 11
+    Const xlInsideHorizontal As Long = 12
+    Const xlEdgeBottom As Long = 9
+
+    On Error Resume Next
+    ' 1. Clear existing borders
+    mTableRange.Borders.LineStyle = -4142
+
+    ' 2. Outer Box frame
+    ApplyBoxBorders mTableRange, actOuter, actualColor
+
+    ' 3. Header Underline (prominent accent)
+    If Not mHeaderRange Is Nothing Then
+        With mHeaderRange.Borders(xlEdgeBottom)
+            .LineStyle = 1
+            .Weight = actUnderline
+            .Color = actualColor
+        End With
+    End If
+
+    ' 4. Inside Horizontal row dividers
+    If Not mDataBodyRange Is Nothing And mRowCount > 1 Then
+        With mDataBodyRange.Borders(xlInsideHorizontal)
+            .LineStyle = 1
+            .Weight = 2 ' xlThin
+            .Color = actualColor
+        End With
+    End If
+
+    ' 5. Inside Vertical dividers (optional)
+    If ShowVerticalBorders Then
+        With mTableRange.Borders(xlInsideVertical)
+            .LineStyle = 1
+            .Weight = 2 ' xlThin
+            .Color = actualColor
+        End With
+    End If
+
+    ' 6. Preserve Total row double bottom border if present
+    If mTotalRowHighlighted Then
+        HighlightTotalRow TopBorder:=True, DoubleBottomBorder:=True
+    End If
+    On Error GoTo 0
+
+    Set ApplyModernBorders = Me
+End Function
+
+' Applies a medium or thick framing border around the outer perimeter of the table.
+Public Function ApplyOuterBorder(Optional ByVal BorderColor As Long = 0, _
+                                 Optional ByVal Weight As Long = -4138) As cTableStyler
+    If mTableRange Is Nothing Then
+        Set ApplyOuterBorder = Me
+        Exit Function
+    End If
+
+    Dim actWeight As Long
+    If Weight = 3 Then actWeight = -4138 Else actWeight = Weight
+
+    On Error Resume Next
+    ApplyBoxBorders mTableRange, actWeight, BorderColor
+    On Error GoTo 0
+
+    Set ApplyOuterBorder = Me
+End Function
+
+' Clears all borders from the table range in 1 COM call.
+Public Function ClearBorders() As cTableStyler
+    If Not mTableRange Is Nothing Then
+        On Error Resume Next
+        mTableRange.Borders.LineStyle = -4142 ' xlNone
+        On Error GoTo 0
+    End If
+    Set ClearBorders = Me
 End Function
 
 ' Applies alternating light background fill to even data rows.
@@ -1911,6 +2141,24 @@ Private Sub ApplyBoxBorders(ByVal Rng As Object, ByVal Weight As Long, ByVal Bor
         End With
     Next b
 End Sub
+
+Private Function ColLetterFromIndex(ByVal ColIndex As Long) As String
+    If ColIndex < 1 Then Exit Function
+    If Not mWorksheet Is Nothing Then
+        ColLetterFromIndex = Split(mWorksheet.Cells(1, ColIndex).Address(True, False), "$")(0)
+    Else
+        Dim s As String
+        Dim n As Long
+        n = ColIndex
+        Do While n > 0
+            Dim m As Long
+            m = (n - 1) Mod 26
+            s = Chr$(65 + m) & s
+            n = (n - m) \ 26
+        Loop
+        ColLetterFromIndex = s
+    End If
+End Function
 
 Private Function ResolveColIndex(ByVal ColumnKey As Variant) As Long
     If VarType(ColumnKey) = vbString Then
