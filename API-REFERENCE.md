@@ -263,6 +263,8 @@ End If
 | `ConvertRangeToValues(TargetRange)` | `Range` | แปลงช่วงสูตรให้เป็นค่าคงที่ (Paste Values) โดยไม่ผ่าน Clipboard |
 | `AuditFormulaInconsistency([ColKey])` | `ColKey` | ตรวจหาเซลล์ที่มีสูตรคำนวณต่างจากเพื่อนร่วมคอลัมน์ |
 | `ConvertFormulaReferences(Mode)` | `"A1"` หรือ `"R1C1"` | แปลงสูตรสลับระหว่างรูปแบบ A1 และ R1C1 |
+| `SetTwoWayMatrixLookup(TargetColKey, MatchRowValColKey, MatchColValColKey, MatrixDataAddress, MatrixRowHeadersAddress, MatrixColHeadersAddress, [MatrixSheetName], [MatchType], [IfErrorVal])` | สูตร Two-Way Matrix | ใส่สูตรค้นหาตัดแกน 2 มิติ `=INDEX(..., MATCH(...), MATCH(...))` ทั้งคอลัมน์ตารางแบบ AutoFill |
+| `ApplyTwoWayMatrixLookupToRange(TargetCellOrRange, LookupRowValCell, LookupColValCell, MatrixDataRange, MatrixRowHeadersRange, MatrixColHeadersRange, [MatchType], [IfErrorVal])` | ช่วงเซลล์อิสระ | ใส่สูตร 2-Way Matrix Lookup ลงบน Range หรือพิกัดเซลล์อิสระที่กำหนดเองโดยตรง |
 
 ```vba
 Dim fe As New cFormulaEngine
@@ -270,6 +272,16 @@ fe.Attach ActiveSheet.Range("A1:F100")
 fe.SetColumnFormula "GrossAmount", "=[Qty]*[UnitPrice]"
 fe.SetFilterFormula "H2", "Total", ">", 1000
 fe.ConvertRangeToValues ActiveSheet.Range("D2:D100")
+
+' ใส่สูตร 2-Way Cross-Reference Matrix Lookup ลงบนเซลล์หรือ Range อิสระ
+fe.ApplyTwoWayMatrixLookupToRange TargetCellOrRange:=ws.Range("F6"), _
+                                 LookupRowValCell:=ws.Range("B6"), _
+                                 LookupColValCell:=ws.Range("D5"), _
+                                 MatrixDataRange:=ws.Range("C6:D7"), _
+                                 MatrixRowHeadersRange:=ws.Range("B6:B7"), _
+                                 MatrixColHeadersRange:=ws.Range("C5:D5"), _
+                                 MatchType:=0, _
+                                 IfErrorVal:="N/A"
 ```
 
 ---

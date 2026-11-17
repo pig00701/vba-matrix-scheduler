@@ -6823,7 +6823,7 @@ Public Function LoadFromMatrixRange(ByVal MatrixRange As Object, _
         Err.Raise 5, "cDataFrame.LoadFromMatrixRange", "Header offsets are out of bounds of the supplied MatrixRange."
     End If
 
-    ' Extract column headers
+    ' Extract column headers safely (guarding against IsError, IsNull, and Empty)
     Dim colKeys As New Collection
     Dim colIdxList As New Collection
     Dim c As Long
@@ -6831,9 +6831,13 @@ Public Function LoadFromMatrixRange(ByVal MatrixRange As Object, _
         If c <> headerColIdx Then
             Dim chVal As Variant
             chVal = vData(headerRowIdx, c)
-            If Not IsEmpty(chVal) And Len(Trim$(CStr(chVal))) > 0 Then
-                colKeys.Add CStr(chVal)
-                colIdxList.Add c
+            If Not IsEmpty(chVal) And Not IsNull(chVal) Then
+                If Not IsError(chVal) Then
+                    If Len(Trim$(CStr(chVal))) > 0 Then
+                        colKeys.Add CStr(chVal)
+                        colIdxList.Add c
+                    End If
+                End If
             End If
         End If
     Next c
@@ -6855,11 +6859,31 @@ Public Function LoadFromMatrixRange(ByVal MatrixRange As Object, _
     For r = rLb To rUb
         If r <> headerRowIdx Then
             rKeyVal = vData(r, headerColIdx)
-            If Not IsEmpty(rKeyVal) And Len(Trim$(CStr(rKeyVal))) > 0 Then
+            Dim validRKey As Boolean
+            validRKey = False
+            If Not IsEmpty(rKeyVal) And Not IsNull(rKeyVal) Then
+                If Not IsError(rKeyVal) Then
+                    If Len(Trim$(CStr(rKeyVal))) > 0 Then validRKey = True
+                Else
+                    validRKey = True
+                End If
+            End If
+
+            If validRKey Then
                 For i = 1 To colKeys.Count
                     c = colIdxList.Item(i)
                     cellVal = vData(r, c)
-                    If Not SkipEmptyValues Or (Not IsEmpty(cellVal) And Len(Trim$(CStr(cellVal))) > 0) Then
+                    Dim hasVal As Boolean
+                    hasVal = False
+                    If Not IsEmpty(cellVal) And Not IsNull(cellVal) Then
+                        If IsError(cellVal) Then
+                            hasVal = True
+                        ElseIf Len(Trim$(CStr(cellVal))) > 0 Then
+                            hasVal = True
+                        End If
+                    End If
+
+                    If Not SkipEmptyValues Or hasVal Then
                         colRow.Append rKeyVal
                         colCol.Append colKeys.Item(i)
                         colVal.Append cellVal
@@ -6897,7 +6921,11 @@ Public Function ToMatrixRange(ByVal TargetAnchorCell As Object, _
 
     If AutoFit Then
         On Error Resume Next
-        TargetAnchorCell.Worksheet.UsedRange.Columns.AutoFit
+        If pDf.ColumnCount > 0 Then
+            TargetAnchorCell.Resize(1, pDf.ColumnCount).EntireColumn.AutoFit
+        Else
+            TargetAnchorCell.Worksheet.UsedRange.Columns.AutoFit
+        End If
         On Error GoTo 0
     End If
 

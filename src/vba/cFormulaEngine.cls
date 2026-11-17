@@ -2636,19 +2636,29 @@ Public Function SetTwoWayMatrixLookup(ByVal TargetColKey As Variant, _
 
     Dim sheetRef As String
     If Len(MatrixSheetName) > 0 Then
-        If InStr(MatrixSheetName, " ") > 0 Or InStr(MatrixSheetName, "-") > 0 Then
-            sheetRef = "'" & Replace(MatrixSheetName, "'", "''") & "'!"
+        If InStr(MatrixDataAddress, "!") = 0 Then
+            If InStr(MatrixSheetName, " ") > 0 Or InStr(MatrixSheetName, "-") > 0 Then
+                sheetRef = "'" & Replace(MatrixSheetName, "'", "''") & "'!"
+            Else
+                sheetRef = MatrixSheetName & "!"
+            End If
         Else
-            sheetRef = MatrixSheetName & "!"
+            sheetRef = ""
         End If
     Else
         sheetRef = ""
     End If
 
+    ' Ensure matrix addresses are absolute locked so they do not drift across rows
+    Dim dataAddr As String, rowHdrAddr As String, colHdrAddr As String
+    dataAddr = EnsureAbsoluteRef(MatrixDataAddress)
+    rowHdrAddr = EnsureAbsoluteRef(MatrixRowHeadersAddress)
+    colHdrAddr = EnsureAbsoluteRef(MatrixColHeadersAddress)
+
     Dim coreFormula As String
-    coreFormula = "INDEX(" & sheetRef & MatrixDataAddress & ", MATCH(" & rColLetter & "{row}, " & _
-                  sheetRef & MatrixRowHeadersAddress & ", " & CStr(MatchType) & "), MATCH(" & _
-                  cColLetter & "{row}, " & sheetRef & MatrixColHeadersAddress & ", " & CStr(MatchType) & "))"
+    coreFormula = "INDEX(" & sheetRef & dataAddr & ", MATCH(" & rColLetter & "{row}, " & _
+                  sheetRef & rowHdrAddr & ", " & CStr(MatchType) & "), MATCH(" & _
+                  cColLetter & "{row}, " & sheetRef & colHdrAddr & ", " & CStr(MatchType) & "))"
 
     Dim tmpl As String
     If Not IsMissing(IfErrorVal) And Not IsEmpty(IfErrorVal) Then
@@ -2682,14 +2692,60 @@ Public Sub ApplyTwoWayMatrixLookupToRange(ByVal TargetCellOrRange As Object, _
     If MatrixRowHeadersRange Is Nothing Then Err.Raise 91, "cFormulaEngine", "MatrixRowHeadersRange cannot be Nothing."
     If MatrixColHeadersRange Is Nothing Then Err.Raise 91, "cFormulaEngine", "MatrixColHeadersRange cannot be Nothing."
 
-    Dim dataAddr As String, rowHdrAddr As String, colHdrAddr As String
-    dataAddr = MatrixDataRange.Address(True, True, 1, True)
-    rowHdrAddr = MatrixRowHeadersRange.Address(True, True, 1, True)
-    colHdrAddr = MatrixColHeadersRange.Address(True, True, 1, True)
+    Dim targetWs As Object, matWs As Object
+    Set targetWs = TargetCellOrRange.Worksheet
+    Set matWs = MatrixDataRange.Worksheet
 
+    Dim isSameSheet As Boolean, isSameWb As Boolean
+    isSameWb = (targetWs.Parent.Name = matWs.Parent.Name)
+    isSameSheet = isSameWb And (targetWs.Name = matWs.Name)
+
+    Dim dataAddr As String, rowHdrAddr As String, colHdrAddr As String
+    If isSameSheet Then
+        dataAddr = MatrixDataRange.Address(True, True)
+        rowHdrAddr = MatrixRowHeadersRange.Address(True, True)
+        colHdrAddr = MatrixColHeadersRange.Address(True, True)
+    ElseIf isSameWb Then
+        Dim wsName As String, sheetPrefix As String
+        wsName = matWs.Name
+        If InStr(wsName, " ") > 0 Or InStr(wsName, "-") > 0 Then
+            sheetPrefix = "'" & Replace(wsName, "'", "''") & "'!"
+        Else
+            sheetPrefix = wsName & "!"
+        End If
+        dataAddr = sheetPrefix & MatrixDataRange.Address(True, True)
+        rowHdrAddr = sheetPrefix & MatrixRowHeadersRange.Address(True, True)
+        colHdrAddr = sheetPrefix & MatrixColHeadersRange.Address(True, True)
+    Else
+        dataAddr = MatrixDataRange.Address(True, True, 1, True)
+        rowHdrAddr = MatrixRowHeadersRange.Address(True, True, 1, True)
+        colHdrAddr = MatrixColHeadersRange.Address(True, True, 1, True)
+    End If
+
+    ' Locked column for row header lookup ($ColRow), locked row for column header lookup (Col$Row)
     Dim rowValAddr As String, colValAddr As String
     rowValAddr = LookupRowValCell.Address(False, True)
     colValAddr = LookupColValCell.Address(True, False)
+
+    If LookupRowValCell.Worksheet.Name <> targetWs.Name Then
+        Dim rWs As String
+        rWs = LookupRowValCell.Worksheet.Name
+        If InStr(rWs, " ") > 0 Or InStr(rWs, "-") > 0 Then
+            rowValAddr = "'" & Replace(rWs, "'", "''") & "'!" & rowValAddr
+        Else
+            rowValAddr = rWs & "!" & rowValAddr
+        End If
+    End If
+
+    If LookupColValCell.Worksheet.Name <> targetWs.Name Then
+        Dim cWs As String
+        cWs = LookupColValCell.Worksheet.Name
+        If InStr(cWs, " ") > 0 Or InStr(cWs, "-") > 0 Then
+            colValAddr = "'" & Replace(cWs, "'", "''") & "'!" & colValAddr
+        Else
+            colValAddr = cWs & "!" & colValAddr
+        End If
+    End If
 
     Dim coreFormula As String
     coreFormula = "INDEX(" & dataAddr & ", MATCH(" & rowValAddr & ", " & rowHdrAddr & ", " & CStr(MatchType) & "), MATCH(" & colValAddr & ", " & colHdrAddr & ", " & CStr(MatchType) & "))"
@@ -2709,3 +2765,33 @@ Public Sub ApplyTwoWayMatrixLookupToRange(ByVal TargetCellOrRange As Object, _
 
     TargetCellOrRange.Formula = finalFormula
 End Sub
+
+Private Function EnsureAbsoluteRef(ByVal Addr As String) As String
+    Dim s As String
+    s = Trim$(Addr)
+    If Len(s) = 0 Then Exit Function
+    If InStr(s, "$") > 0 Or InStr(s, "!") > 0 Then
+        EnsureAbsoluteRef = s
+        Exit Function
+    End If
+    Dim parts() As String
+    parts = Split(s, ":")
+    Dim i As Long
+    For i = LBound(parts) To UBound(parts)
+        Dim p As String, colP As String, rowP As String, k As Long, ch As String
+        p = Trim$(parts(i))
+        colP = "": rowP = ""
+        For k = 1 To Len(p)
+            ch = Mid$(p, k, 1)
+            If (ch >= "A" And ch <= "Z") Or (ch >= "a" And ch <= "z") Then
+                colP = colP & ch
+            ElseIf ch >= "0" And ch <= "9" Then
+                rowP = rowP & ch
+            End If
+        Next k
+        If Len(colP) > 0 And Len(rowP) > 0 Then
+            parts(i) = "$" & UCase$(colP) & "$" & rowP
+        End If
+    Next i
+    EnsureAbsoluteRef = Join(parts, ":")
+End Function

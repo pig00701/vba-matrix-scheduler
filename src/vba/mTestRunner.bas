@@ -4389,6 +4389,22 @@ Private Sub Test_CrossReferenceMatrix()
     AssertTrue InStr(fStr, "IFERROR(") > 0, "2-way matrix formula wrapped in IFERROR"
     AssertEqual ws.Range("F6").Value2, ws.Range("D6").Value2, "2-way matrix lookup evaluated value matches matrix intersection"
 
+    ' 5. FormulaEngine: SetTwoWayMatrixLookup on a column range
+    LogPrint "  [49.4] SetTwoWayMatrixLookup on attached range..."
+    ws.Range("I5").Value2 = "Employee"
+    ws.Range("J5").Value2 = "Month"
+    ws.Range("K5").Value2 = "LookupVal"
+    ws.Range("I6").Value2 = "Alice": ws.Range("J6").Value2 = "Feb"
+    ws.Range("I7").Value2 = "Bob":   ws.Range("J7").Value2 = "Jan"
+
+    Dim feTable As New cFormulaEngine
+    feTable.Attach ws.Range("I5:K7"), True
+    feTable.SetTwoWayMatrixLookup "LookupVal", "Employee", "Month", _
+                                  "C6:D7", "B6:B7", "C5:D5", "", 0, 0#
+
+    AssertEqual ws.Range("K6").Value2, 150#, "SetTwoWayMatrixLookup resolved Alice Feb to 150"
+    AssertEqual ws.Range("K7").Value2, 170#, "SetTwoWayMatrixLookup resolved Bob Jan to 170"
+
     xlApp.DisplayAlerts = False
     On Error Resume Next
     ThisWorkbook.Worksheets("MatrixTest").Delete

@@ -884,8 +884,8 @@ Dim dfUnpivoted As New cDataFrame
 Call dfUnpivoted.LoadFromMatrixRange(ws.Range("B5:D7"), RowHeaderColOffset:=1, ColHeaderRowOffset:=1, _
                                      RowHeaderName:="Employee", ColHeaderName:="Period", ValueName:="LoggedHours")
 
-' --- 3. Dynamic 2-Way Matrix Cross-Reference Formula ---
-' Injects =INDEX(MatrixData, MATCH(RowKey, RowHeaders, 0), MATCH(ColKey, ColHeaders, 0))
+' --- 3. Dynamic 2-Way Matrix Cross-Reference Formulas ---
+' 3a. Injects =INDEX(MatrixData, MATCH(RowKey, RowHeaders, 0), MATCH(ColKey, ColHeaders, 0)) into Range
 Dim fe As New cFormulaEngine
 fe.ApplyTwoWayMatrixLookupToRange TargetCellOrRange:=ws.Range("F6"), _
                                  LookupRowValCell:=ws.Range("B6"), _
@@ -894,6 +894,16 @@ fe.ApplyTwoWayMatrixLookupToRange TargetCellOrRange:=ws.Range("F6"), _
                                  MatrixRowHeadersRange:=ws.Range("B6:B7"), _
                                  MatrixColHeadersRange:=ws.Range("C5:D5"), _
                                  MatchType:=0, IfErrorVal:="N/A"
+
+' 3b. Or injects 2-way matrix lookup across an entire table column via AutoFill:
+fe.Attach ws.Range("I5:K20"), HasHeaders:=True
+fe.SetTwoWayMatrixLookup TargetColKey:="LookupVal", _
+                         MatchRowValColKey:="Employee", _
+                         MatchColValColKey:="Month", _
+                         MatrixDataAddress:="C6:D7", _
+                         MatrixRowHeadersAddress:="B6:B7", _
+                         MatrixColHeadersAddress:="C5:D5", _
+                         MatchType:=0, IfErrorVal:=0#
 ```
 
 ---
