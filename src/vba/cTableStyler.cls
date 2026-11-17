@@ -2225,6 +2225,142 @@ Public Function FreezeHeader(Optional ByVal FreezeColumns As Long = 0) As cTable
     Set FreezeHeader = Me
 End Function
 
+' Applies a 2-color or 3-color Heatmap across a 2D Matrix Range (or the attached matrix data area).
+Public Function ApplyMatrixHeatmap(Optional ByVal MatrixRange As Object = Nothing, _
+                                   Optional ByVal PresetName As String = "RED_YELLOW_GREEN", _
+                                   Optional ByVal HasRowHeaders As Boolean = True, _
+                                   Optional ByVal HasColHeaders As Boolean = True) As cTableStyler
+    Dim targetRng As Object
+    If Not MatrixRange Is Nothing Then
+        Set targetRng = MatrixRange
+    ElseIf Not mDataBodyRange Is Nothing Then
+        Set targetRng = mDataBodyRange
+    Else
+        Set ApplyMatrixHeatmap = Me
+        Exit Function
+    End If
+
+    ' Compute numeric data area (excluding header row and header column if requested)
+    Dim numRows As Long, numCols As Long
+    numRows = targetRng.Rows.Count
+    numCols = targetRng.Columns.Count
+
+    Dim startR As Long, startC As Long
+    startR = IIf(HasColHeaders, 2, 1)
+    startC = IIf(HasRowHeaders, 2, 1)
+
+    If startR > numRows Or startC > numCols Then
+        Set ApplyMatrixHeatmap = Me
+        Exit Function
+    End If
+
+    Dim dataArea As Object
+    Set dataArea = targetRng.Worksheet.Range(targetRng.Cells(startR, startC), targetRng.Cells(numRows, numCols))
+
+    Dim ucPreset As String
+    ucPreset = UCase$(Trim$(PresetName))
+
+    On Error Resume Next
+    Dim cs As Object
+    Select Case ucPreset
+        Case "RED_YELLOW_GREEN", "KPI", "TASK", "COMPLETION"
+            ' Low = Red, Mid = Yellow, High = Green
+            Set cs = dataArea.FormatConditions.AddColorScale(3)
+            If Not cs Is Nothing Then
+                cs.ColorScaleCriteria(1).FormatColor.Color = RGB(248, 105, 107) ' Red
+                cs.ColorScaleCriteria(2).FormatColor.Color = RGB(255, 235, 132) ' Yellow
+                cs.ColorScaleCriteria(3).FormatColor.Color = RGB(99, 190, 123)  ' Green
+            End If
+
+        Case "GREEN_YELLOW_RED", "COST", "RISK", "DEFECT"
+            ' Low = Green, Mid = Yellow, High = Red
+            Set cs = dataArea.FormatConditions.AddColorScale(3)
+            If Not cs Is Nothing Then
+                cs.ColorScaleCriteria(1).FormatColor.Color = RGB(99, 190, 123)  ' Green
+                cs.ColorScaleCriteria(2).FormatColor.Color = RGB(255, 235, 132) ' Yellow
+                cs.ColorScaleCriteria(3).FormatColor.Color = RGB(248, 105, 107) ' Red
+            End If
+
+        Case "BLUES", "BLUE"
+            Set cs = dataArea.FormatConditions.AddColorScale(2)
+            If Not cs Is Nothing Then
+                cs.ColorScaleCriteria(1).FormatColor.Color = RGB(235, 243, 250) ' Light Blue
+                cs.ColorScaleCriteria(2).FormatColor.Color = RGB(49, 112, 183)  ' Deep Blue
+            End If
+
+        Case "GREENS", "GREEN"
+            Set cs = dataArea.FormatConditions.AddColorScale(2)
+            If Not cs Is Nothing Then
+                cs.ColorScaleCriteria(1).FormatColor.Color = RGB(232, 245, 233) ' Light Green
+                cs.ColorScaleCriteria(2).FormatColor.Color = RGB(56, 142, 60)   ' Deep Green
+            End If
+
+        Case "HEAT", "ORANGE", "FIRE"
+            Set cs = dataArea.FormatConditions.AddColorScale(3)
+            If Not cs Is Nothing Then
+                cs.ColorScaleCriteria(1).FormatColor.Color = RGB(255, 255, 255) ' White
+                cs.ColorScaleCriteria(2).FormatColor.Color = RGB(255, 165, 0)   ' Orange
+                cs.ColorScaleCriteria(3).FormatColor.Color = RGB(220, 20, 60)   ' Crimson Red
+            End If
+
+        Case Else
+            ' Default 3-color scale
+            Set cs = dataArea.FormatConditions.AddColorScale(3)
+            If Not cs Is Nothing Then
+                cs.ColorScaleCriteria(1).FormatColor.Color = RGB(248, 105, 107)
+                cs.ColorScaleCriteria(2).FormatColor.Color = RGB(255, 235, 132)
+                cs.ColorScaleCriteria(3).FormatColor.Color = RGB(99, 190, 123)
+            End If
+    End Select
+    On Error GoTo 0
+
+    Set ApplyMatrixHeatmap = Me
+End Function
+
+' Applies in-cell data bars across a 2D Matrix Range (or attached matrix data area).
+Public Function ApplyMatrixDataBars(Optional ByVal MatrixRange As Object = Nothing, _
+                                    Optional ByVal BarColor As Long = 5287936, _
+                                    Optional ByVal HasRowHeaders As Boolean = True, _
+                                    Optional ByVal HasColHeaders As Boolean = True, _
+                                    Optional ByVal ShowValueOnly As Boolean = False) As cTableStyler
+    Dim targetRng As Object
+    If Not MatrixRange Is Nothing Then
+        Set targetRng = MatrixRange
+    ElseIf Not mDataBodyRange Is Nothing Then
+        Set targetRng = mDataBodyRange
+    Else
+        Set ApplyMatrixDataBars = Me
+        Exit Function
+    End If
+
+    Dim numRows As Long, numCols As Long
+    numRows = targetRng.Rows.Count
+    numCols = targetRng.Columns.Count
+
+    Dim startR As Long, startC As Long
+    startR = IIf(HasColHeaders, 2, 1)
+    startC = IIf(HasRowHeaders, 2, 1)
+
+    If startR > numRows Or startC > numCols Then
+        Set ApplyMatrixDataBars = Me
+        Exit Function
+    End If
+
+    Dim dataArea As Object
+    Set dataArea = targetRng.Worksheet.Range(targetRng.Cells(startR, startC), targetRng.Cells(numRows, numCols))
+
+    On Error Resume Next
+    Dim db As Object
+    Set db = dataArea.FormatConditions.AddDatabar()
+    If Not db Is Nothing Then
+        db.BarColor.Color = BarColor
+        If ShowValueOnly Then db.ShowValue = False
+    End If
+    On Error GoTo 0
+
+    Set ApplyMatrixDataBars = Me
+End Function
+
 Private Sub CheckAttached(ByVal MethodName As String)
     If mWorksheet Is Nothing Or mTopLeftCell Is Nothing Then
         Err.Raise 91, "cTableStyler." & MethodName, _

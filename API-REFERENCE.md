@@ -33,7 +33,7 @@
 | `LoadFromJSON(JsonString)` | `Function As cDataFrame` | แปลง JSON String (`RECORDS` หรือ `SPLIT`) เข้า DataFrame |
 | `LoadFrom3DArray(Data3D, [HasHeaders], [LayerNames], [LayerColumnName])` | `Function As cDataFrame` | คลี่ 3D Variant Array `(Row, Col, Layer)` เป็นตาราง 2D พร้อมระบุคอลัมน์ Layer (เช่น Quarter/Sheet) |
 | `LoadFromSheets([SheetPatternOrNames], [TargetWorkbook], [HasHeaders], [AddSheetColumn], [SheetColumnName], [ExcludeSheets])` | `Function As cDataFrame` | โหลดและรวมตารางจากหลาย Worksheet ตามชื่อหรือ wildcard (เช่น `Array("Q1", "Q2")` หรือ `"Data_*"`) |
-| `LoadFromMatrixRange(MatrixRange, [RowHeaderColOffset], [ColHeaderRowOffset], [RowHeaderName], [ColHeaderName], [ValueName], [SkipEmptyValues])` | `Function As cDataFrame` | อ่านและ unpivot ตาราง Cross-Reference Matrix บน Range ที่กำหนดเอง (ระบุแถว/คอลัมน์หัวตารางได้) กลับเป็น 3 คอลัมน์ `(RowKey, ColKey, Value)` |
+| `LoadFromMatrixRange(MatrixRange, [RowHeaderColOffset], [ColHeaderRowOffset], [RowHeaderName], [ColHeaderName], [ValueName], [SkipEmptyValues], [ColHeaderRowCount], [RowHeaderColCount], [HeaderDelimiter])` | `Function As cDataFrame` | อ่านและ unpivot ตาราง Cross-Reference Matrix (รองรับหัวตารางหลายชั้น Multi-Level เช่น ปี $\rightarrow$ เดือน หรือ แผนก $\rightarrow$ ตำแหน่ง พร้อม Forward-Fill เซลล์ที่ Merge และแยกคอลัมน์ด้วยจุลภาค) |
 
 ```vba
 Dim df As New cDataFrame
@@ -93,6 +93,7 @@ df.CoerceDate "order_date"
 | `Transpose()` | `Function As cDataFrame` | สลับแกนแถวและคอลัมน์ (Pivot Rows to Columns) |
 | `Melt(IdVars, ValueVars, [VarName], [ValName])` | `Function As cDataFrame` | Unpivot แปลงตารางแนวกว้าง (Wide) เป็นแนวยาว (Long Format) |
 | `Pivot(IndexCol, PivotCol, ValueCol, [AggFunc="SUM"], [FillEmpty=0#])` | `Function As cDataFrame` | ทำ Pivot Table สรุปข้อมูลไขว้สองมิติ |
+| `MatrixDiff(ActualOrTargetDf, RowKeyCol, ColKeyCol, ValueCol, [TargetValueCol], [DiffColName], [DiffMode], [IncludePctDiff], [PctDiffColName])` | `Function As cDataFrame` | คำนวณส่วนต่างเมทริกซ์ (Plan vs Actual) ใน RAM พร้อมจับคู่ `(RowKey, ColKey)` และคำนวณ % Variance อัตโนมัติ |
 | `GroupBy(GroupCols, AggCols, AggFuncs)` | `Function As cDataFrame` | จัดกลุ่ม Aggregation (`SUM`, `COUNT`, `AVG`, `MIN`, `MAX`, `MEDIAN`, `STD`, `NUNIQUE`) |
 | `Merge(RightTable, [OnKey], [How="INNER"], [LeftOn], [RightOn])` | `Function As cDataFrame` | รวมตาราง (`INNER`, `LEFT`, `RIGHT`, `FULL`, `LEFT_ANTI`, `LEFT_SEMI`, `CROSS`) |
 | `NLargest(N, ColumnKey)` / `NSmallest(N, ColumnKey)` | `Function As cDataFrame` | คัดเลือก N แถวแรกที่มีค่าสูงสุดหรือต่ำสุด |
@@ -201,6 +202,8 @@ Set dfSkills = df.Explode("skills", ",")
 | `ApplyIconSets(ColumnKeyOrPattern, [IconSetId=4])` | `ColKey, IconSetId` | ใส่ไอคอนไฟจราจรหรือลูกศร (KPI Icon Sets) |
 | `AutoFitWithLimits([MinWidth=8], [MaxWidth=45])` | `MinWidth, MaxWidth` | ปรับความกว้างคอลัมน์อัตโนมัติโดยจำกัดขอบเขตไม่ให้ล้นจอ |
 | `FreezeHeader([FreezeColumns=0])` | `FreezeColumns` | ตรึงแถวหัวตาราง (และคอลัมน์ซ้าย) ไว้ตลอดการเลื่อนจอ |
+| `ApplyMatrixHeatmap([MatrixRange], [PresetName="RED_YELLOW_GREEN"], [HasRowHeaders=True], [HasColHeaders=True])` | `MatrixRange, Preset` | ใส่ Conditional Formatting ไล่เฉดสี Heatmap (ColorScale) บนพื้นที่ตัวเลขของเมทริกซ์ (รองรับ `"RED_YELLOW_GREEN"`, `"GREEN_YELLOW_RED"`, `"BLUES"`, `"GREENS"`, `"HEAT"`) |
+| `ApplyMatrixDataBars([MatrixRange], [BarColor], [HasRowHeaders=True], [HasColHeaders=True], [ShowValueOnly=False])` | `MatrixRange, BarColor` | ใส่ In-Cell Data Bars บนพื้นที่ตัวเลขของเมทริกซ์เพื่อเปรียบเทียบขนาดข้อมูลด้วยสายตา |
 | `ConvertToTable([TableName], [TableStyle])` | `TableName, TableStyle` | แปลงพื้นที่ตารางเป็นโครงสร้าง Excel Table (`ListObject`) |
 | `ClearFormats()` | - | ล้างการจัดฟอร์แมตทั้งหมดออกจากพื้นที่ตาราง |
 

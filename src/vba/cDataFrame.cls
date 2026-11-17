@@ -6792,14 +6792,18 @@ Public Function LoadFromSheets(Optional ByVal SheetPatternOrNames As Variant = "
 End Function
 
 
-' Ingests a 2D matrix range (Row Headers x Column Headers) from a worksheet and unpivots it into a 3-column DataFrame.
+' Ingests a 2D matrix range (Row Headers x Column Headers) from a worksheet and unpivots it into a DataFrame.
+' Supports multi-level hierarchical headers (e.g. Year -> Month, Department -> Role) via ColHeaderRowCount & RowHeaderColCount.
 Public Function LoadFromMatrixRange(ByVal MatrixRange As Object, _
                                     Optional ByVal RowHeaderColOffset As Long = 1, _
                                     Optional ByVal ColHeaderRowOffset As Long = 1, _
                                     Optional ByVal RowHeaderName As String = "RowKey", _
                                     Optional ByVal ColHeaderName As String = "ColKey", _
                                     Optional ByVal ValueName As String = "Value", _
-                                    Optional ByVal SkipEmptyValues As Boolean = True) As cDataFrame
+                                    Optional ByVal SkipEmptyValues As Boolean = True, _
+                                    Optional ByVal ColHeaderRowCount As Long = 1, _
+                                    Optional ByVal RowHeaderColCount As Long = 1, _
+                                    Optional ByVal HeaderDelimiter As String = " - ") As cDataFrame
     If MatrixRange Is Nothing Then
         Err.Raise 91, "cDataFrame.LoadFromMatrixRange", "MatrixRange cannot be Nothing."
     End If
@@ -6815,85 +6819,180 @@ Public Function LoadFromMatrixRange(ByVal MatrixRange As Object, _
     rLb = LBound(vData, 1): rUb = UBound(vData, 1)
     cLb = LBound(vData, 2): cUb = UBound(vData, 2)
 
-    Dim headerRowIdx As Long, headerColIdx As Long
-    headerRowIdx = rLb + ColHeaderRowOffset - 1
-    headerColIdx = cLb + RowHeaderColOffset - 1
+    If ColHeaderRowCount < 1 Then ColHeaderRowCount = 1
+    If RowHeaderColCount < 1 Then RowHeaderColCount = 1
 
-    If headerRowIdx < rLb Or headerRowIdx > rUb Or headerColIdx < cLb Or headerColIdx > cUb Then
-        Err.Raise 5, "cDataFrame.LoadFromMatrixRange", "Header offsets are out of bounds of the supplied MatrixRange."
+    Dim headerRowStart As Long, headerRowEnd As Long
+    headerRowStart = rLb + ColHeaderRowOffset - 1
+    headerRowEnd = headerRowStart + ColHeaderRowCount - 1
+
+    Dim headerColStart As Long, headerColEnd As Long
+    headerColStart = cLb + RowHeaderColOffset - 1
+    headerColEnd = headerColStart + RowHeaderColCount - 1
+
+    If headerRowStart < rLb Or headerRowEnd > rUb Or headerColStart < cLb Or headerColEnd > cUb Then
+        Err.Raise 5, "cDataFrame.LoadFromMatrixRange", "Header offsets and counts are out of bounds of the supplied MatrixRange."
     End If
 
-    ' Extract column headers safely (guarding against IsError, IsNull, and Empty)
-    Dim colKeys As New Collection
+    ' Split header names if comma-separated (e.g. "Department,Role" or "Year,Month")
+    Dim rowColNames() As String, colColNames() As String
+    rowColNames = Split(RowHeaderName, ",")
+    colColNames = Split(ColHeaderName, ",")
+
+    Dim splitRowHeaders As Boolean, splitColHeaders As Boolean
+    splitRowHeaders = (UBound(rowColNames) - LBound(rowColNames) + 1 = RowHeaderColCount) And (RowHeaderColCount > 1)
+    splitColHeaders = (UBound(colColNames) - LBound(colColNames) + 1 = ColHeaderRowCount) And (ColHeaderRowCount > 1)
+
+    ' 1. Extract Column Headers (Forward-fill merged header cells across columns)
+    Dim lastColVal() As String
+    ReDim lastColVal(1 To ColHeaderRowCount)
+
+    Dim colKeyLevels As New Collection ' Holds array of level strings for each data column
     Dim colIdxList As New Collection
-    Dim c As Long
-    For c = cLb To cUb
-        If c <> headerColIdx Then
-            Dim chVal As Variant
-            chVal = vData(headerRowIdx, c)
-            If Not IsEmpty(chVal) And Not IsNull(chVal) Then
-                If Not IsError(chVal) Then
-                    If Len(Trim$(CStr(chVal))) > 0 Then
-                        colKeys.Add CStr(chVal)
-                        colIdxList.Add c
-                    End If
+    Dim c As Long, lvl As Long
+
+    For c = headerColEnd + 1 To cUb
+        Dim cLevels() As String
+        ReDim cLevels(1 To ColHeaderRowCount)
+        Dim hasAnyColVal As Boolean
+        hasAnyColVal = False
+
+        For lvl = 1 To ColHeaderRowCount
+            Dim curHdrRow As Long
+            curHdrRow = headerRowStart + lvl - 1
+            Dim cellHdrVal As Variant
+            cellHdrVal = vData(curHdrRow, c)
+
+            If Not IsEmpty(cellHdrVal) And Not IsNull(cellHdrVal) Then
+                If Not IsError(cellHdrVal) Then
+                    Dim sHdr As String
+                    sHdr = Trim$(CStr(cellHdrVal))
+                    If Len(sHdr) > 0 Then lastColVal(lvl) = sHdr
                 End If
             End If
+
+            cLevels(lvl) = lastColVal(lvl)
+            If Len(cLevels(lvl)) > 0 Then hasAnyColVal = True
+        Next lvl
+
+        If hasAnyColVal Then
+            colKeyLevels.Add cLevels
+            colIdxList.Add c
         End If
     Next c
 
-    ' Initialize this DataFrame with 3 columns: RowHeaderName, ColHeaderName, ValueName
+    ' 2. Initialize Columns in this DataFrame
     mCols.RemoveAll
     mRowCount = 0
     Set mRowIndexMap = Nothing
     mIndexColumnName = ""
     mIndexDirty = False
 
-    Dim colRow As cColumn, colCol As cColumn, colVal As cColumn
-    Set colRow = Me.AddColumn(RowHeaderName)
-    Set colCol = Me.AddColumn(ColHeaderName)
-    Set colVal = Me.AddColumn(ValueName)
+    Dim rowColObjs() As cColumn
+    If splitRowHeaders Then
+        ReDim rowColObjs(1 To RowHeaderColCount)
+        For lvl = 1 To RowHeaderColCount
+            Set rowColObjs(lvl) = Me.AddColumn(Trim$(rowColNames(LBound(rowColNames) + lvl - 1)))
+        Next lvl
+    Else
+        ReDim rowColObjs(1 To 1)
+        Set rowColObjs(1) = Me.AddColumn(Trim$(RowHeaderName))
+    End If
+
+    Dim colColObjs() As cColumn
+    If splitColHeaders Then
+        ReDim colColObjs(1 To ColHeaderRowCount)
+        For lvl = 1 To ColHeaderRowCount
+            Set colColObjs(lvl) = Me.AddColumn(Trim$(colColNames(LBound(colColNames) + lvl - 1)))
+        Next lvl
+    Else
+        ReDim colColObjs(1 To 1)
+        Set colColObjs(1) = Me.AddColumn(Trim$(ColHeaderName))
+    End If
+
+    Dim valColObj As cColumn
+    Set valColObj = Me.AddColumn(Trim$(ValueName))
+
+    ' 3. Unpivot Data Area
+    Dim lastRowVal() As String
+    ReDim lastRowVal(1 To RowHeaderColCount)
 
     Dim r As Long, i As Long
-    Dim rKeyVal As Variant, cellVal As Variant
-    For r = rLb To rUb
-        If r <> headerRowIdx Then
-            rKeyVal = vData(r, headerColIdx)
-            Dim validRKey As Boolean
-            validRKey = False
-            If Not IsEmpty(rKeyVal) And Not IsNull(rKeyVal) Then
-                If Not IsError(rKeyVal) Then
-                    If Len(Trim$(CStr(rKeyVal))) > 0 Then validRKey = True
-                Else
-                    validRKey = True
+    Dim rLevels() As String
+    For r = headerRowEnd + 1 To rUb
+        ReDim rLevels(1 To RowHeaderColCount)
+        Dim hasAnyRowKey As Boolean
+        hasAnyRowKey = False
+
+        For lvl = 1 To RowHeaderColCount
+            Dim curHdrCol As Long
+            curHdrCol = headerColStart + lvl - 1
+            Dim cellRVal As Variant
+            cellRVal = vData(r, curHdrCol)
+
+            If Not IsEmpty(cellRVal) And Not IsNull(cellRVal) Then
+                If Not IsError(cellRVal) Then
+                    Dim sR As String
+                    sR = Trim$(CStr(cellRVal))
+                    If Len(sR) > 0 Then lastRowVal(lvl) = sR
                 End If
             End If
 
-            If validRKey Then
-                For i = 1 To colKeys.Count
-                    c = colIdxList.Item(i)
-                    cellVal = vData(r, c)
-                    Dim hasVal As Boolean
-                    hasVal = False
-                    If Not IsEmpty(cellVal) And Not IsNull(cellVal) Then
-                        If IsError(cellVal) Then
-                            hasVal = True
-                        ElseIf Len(Trim$(CStr(cellVal))) > 0 Then
-                            hasVal = True
-                        End If
+            rLevels(lvl) = lastRowVal(lvl)
+            If Len(rLevels(lvl)) > 0 Then hasAnyRowKey = True
+        Next lvl
+
+        If hasAnyRowKey Then
+            Dim singleRowKeyStr As String
+            If Not splitRowHeaders Then
+                singleRowKeyStr = Join(rLevels, HeaderDelimiter)
+            End If
+
+            For i = 1 To colKeyLevels.Count
+                c = colIdxList.Item(i)
+                Dim curCLevels() As String
+                curCLevels = colKeyLevels.Item(i)
+
+                Dim cellVal As Variant
+                cellVal = vData(r, c)
+
+                Dim hasVal As Boolean
+                hasVal = False
+                If Not IsEmpty(cellVal) And Not IsNull(cellVal) Then
+                    If IsError(cellVal) Then
+                        hasVal = True
+                    ElseIf Len(Trim$(CStr(cellVal))) > 0 Then
+                        hasVal = True
+                    End If
+                End If
+
+                If Not SkipEmptyValues Or hasVal Then
+                    ' Append Row Keys
+                    If splitRowHeaders Then
+                        For lvl = 1 To RowHeaderColCount
+                            rowColObjs(lvl).Append rLevels(lvl)
+                        Next lvl
+                    Else
+                        rowColObjs(1).Append singleRowKeyStr
                     End If
 
-                    If Not SkipEmptyValues Or hasVal Then
-                        colRow.Append rKeyVal
-                        colCol.Append colKeys.Item(i)
-                        colVal.Append cellVal
+                    ' Append Col Keys
+                    If splitColHeaders Then
+                        For lvl = 1 To ColHeaderRowCount
+                            colColObjs(lvl).Append curCLevels(lvl)
+                        Next lvl
+                    Else
+                        colColObjs(1).Append Join(curCLevels, HeaderDelimiter)
                     End If
-                Next i
-            End If
+
+                    ' Append Value
+                    valColObj.Append cellVal
+                End If
+            Next i
         End If
     Next r
 
-    mRowCount = colRow.Count
+    mRowCount = valColObj.Count
     Set LoadFromMatrixRange = Me
 End Function
 
@@ -6930,4 +7029,133 @@ Public Function ToMatrixRange(ByVal TargetAnchorCell As Object, _
     End If
 
     Set ToMatrixRange = Me
+End Function
+
+' Calculates element-wise matrix variance between Me (e.g. Plan) and ActualOrTargetDf (e.g. Actual).
+' Matches records on (RowKeyCol, ColKeyCol) and computes Variance and optional Percentage Variance.
+Public Function MatrixDiff(ByVal ActualOrTargetDf As cDataFrame, _
+                           ByVal RowKeyCol As Variant, _
+                           ByVal ColKeyCol As Variant, _
+                           ByVal ValueCol As Variant, _
+                           Optional ByVal TargetValueCol As Variant = Empty, _
+                           Optional ByVal DiffColName As String = "Variance", _
+                           Optional ByVal DiffMode As String = "ACTUAL_MINUS_PLAN", _
+                           Optional ByVal IncludePctDiff As Boolean = True, _
+                           Optional ByVal PctDiffColName As String = "PctVariance") As cDataFrame
+    If ActualOrTargetDf Is Nothing Then
+        Err.Raise 91, "cDataFrame.MatrixDiff", "ActualOrTargetDf cannot be Nothing."
+    End If
+
+    Dim valColTarget As Variant
+    If IsEmpty(TargetValueCol) Then
+        valColTarget = ValueCol
+    Else
+        valColTarget = TargetValueCol
+    End If
+
+    ' Index Me (Plan) into dictionary: compositeKey -> Double
+    Dim planDict As Object, planRowKeyDict As Object, planColKeyDict As Object
+    Set planDict = CreateObject("Scripting.Dictionary")
+    planDict.CompareMode = vbTextCompare
+    Set planRowKeyDict = CreateObject("Scripting.Dictionary")
+    planRowKeyDict.CompareMode = vbTextCompare
+    Set planColKeyDict = CreateObject("Scripting.Dictionary")
+    planColKeyDict.CompareMode = vbTextCompare
+
+    Dim r As Long
+    Dim rKey As Variant, cKey As Variant, vVal As Variant, compKey As String
+    For r = 1 To mRowCount
+        rKey = Me.Item(r, RowKeyCol)
+        cKey = Me.Item(r, ColKeyCol)
+        vVal = Me.Item(r, ValueCol)
+        If Not IsEmpty(rKey) And Not IsNull(rKey) And Not IsEmpty(cKey) And Not IsNull(cKey) Then
+            compKey = CStr(rKey) & Chr(0) & CStr(cKey)
+            If IsNumeric(vVal) Then
+                planDict(compKey) = CDbl(vVal)
+            Else
+                planDict(compKey) = 0#
+            End If
+            planRowKeyDict(compKey) = rKey
+            planColKeyDict(compKey) = cKey
+        End If
+    Next r
+
+    ' Index ActualOrTargetDf (Actual) into dictionary
+    Dim actDict As Object
+    Set actDict = CreateObject("Scripting.Dictionary")
+    actDict.CompareMode = vbTextCompare
+
+    Dim actRowCount As Long
+    actRowCount = ActualOrTargetDf.RowCount
+    For r = 1 To actRowCount
+        rKey = ActualOrTargetDf.Item(r, RowKeyCol)
+        cKey = ActualOrTargetDf.Item(r, ColKeyCol)
+        vVal = ActualOrTargetDf.Item(r, valColTarget)
+        If Not IsEmpty(rKey) And Not IsNull(rKey) And Not IsEmpty(cKey) And Not IsNull(cKey) Then
+            compKey = CStr(rKey) & Chr(0) & CStr(cKey)
+            If IsNumeric(vVal) Then
+                actDict(compKey) = CDbl(vVal)
+            Else
+                actDict(compKey) = 0#
+            End If
+            If Not planRowKeyDict.Exists(compKey) Then
+                planRowKeyDict(compKey) = rKey
+                planColKeyDict(compKey) = cKey
+            End If
+        End If
+    Next r
+
+    ' Build output DataFrame
+    Dim outDf As New cDataFrame
+    Dim rKeyName As String, cKeyName As String
+    rKeyName = IIf(VarType(RowKeyCol) = vbString, CStr(RowKeyCol), "RowKey")
+    cKeyName = IIf(VarType(ColKeyCol) = vbString, CStr(ColKeyCol), "ColKey")
+
+    outDf.AddColumn rKeyName
+    outDf.AddColumn cKeyName
+    outDf.AddColumn "Plan"
+    outDf.AddColumn "Actual"
+    outDf.AddColumn DiffColName
+    If IncludePctDiff Then
+        outDf.AddColumn PctDiffColName
+    End If
+
+    Dim allKeys As Variant
+    allKeys = planRowKeyDict.Keys
+
+    Dim planNum As Double, actNum As Double, diffNum As Double, pctNum As Double
+    Dim isActualMinusPlan As Boolean
+    isActualMinusPlan = (UCase$(Trim$(DiffMode)) <> "PLAN_MINUS_ACTUAL")
+
+    Dim i As Long
+    For i = LBound(allKeys) To UBound(allKeys)
+        compKey = allKeys(i)
+        rKey = planRowKeyDict(compKey)
+        cKey = planColKeyDict(compKey)
+
+        If planDict.Exists(compKey) Then planNum = planDict(compKey) Else planNum = 0#
+        If actDict.Exists(compKey) Then actNum = actDict(compKey) Else actNum = 0#
+
+        If isActualMinusPlan Then
+            diffNum = actNum - planNum
+        Else
+            diffNum = planNum - actNum
+        End If
+
+        If planNum <> 0# Then
+            pctNum = diffNum / Abs(planNum)
+        ElseIf actNum <> 0# Then
+            pctNum = 1#
+        Else
+            pctNum = 0#
+        End If
+
+        If IncludePctDiff Then
+            outDf.AddRow rKey, cKey, planNum, actNum, diffNum, pctNum
+        Else
+            outDf.AddRow rKey, cKey, planNum, actNum, diffNum
+        End If
+    Next i
+
+    Set MatrixDiff = outDf
 End Function

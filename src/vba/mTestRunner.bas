@@ -92,6 +92,7 @@ Public Function RunAllTests() As String
     Test_CleanAndTransformData
     Test_3DArrayAndMultiSheets
     Test_CrossReferenceMatrix
+    Test_MatrixEnhancements
 
     Dim tElapsed As Double
     tElapsed = Timer - tStart
@@ -4482,4 +4483,123 @@ Private Sub LogPrint(ByVal Msg As String)
         Close #hNum
     End If
     On Error GoTo 0
+End Sub
+' ------------------------------------------------------------------------------
+' Test 50: Matrix Enhancements (Heatmap, Multi-Level Unpivot, MatrixDiff)
+' ------------------------------------------------------------------------------
+Private Sub Test_MatrixEnhancements()
+    On Error GoTo TestFail
+    LogPrint "[TEST 50] Matrix Enhancements (Heatmap, Multi-Level Unpivot, MatrixDiff)..."
+
+    Dim xlApp As Object
+    Set xlApp = ThisWorkbook.Application
+    xlApp.DisplayAlerts = False
+    On Error Resume Next
+    ThisWorkbook.Worksheets("MatrixEnhanceTest").Delete
+    On Error GoTo TestFail
+    xlApp.DisplayAlerts = True
+
+    Dim ws As Object
+    Set ws = ThisWorkbook.Worksheets.Add(After:=ThisWorkbook.Worksheets(ThisWorkbook.Worksheets.Count))
+    ws.Name = "MatrixEnhanceTest"
+
+    ' --------------------------------------------------------------------------
+    ' 50.1: cTableStyler ApplyMatrixHeatmap & ApplyMatrixDataBars
+    ' --------------------------------------------------------------------------
+    LogPrint "  [50.1] ApplyMatrixHeatmap & ApplyMatrixDataBars..."
+    Dim matGrid(1 To 3, 1 To 4) As Variant
+    matGrid(1, 1) = "Dept": matGrid(1, 2) = "Q1":  matGrid(1, 3) = "Q2":  matGrid(1, 4) = "Q3"
+    matGrid(2, 1) = "Dev":  matGrid(2, 2) = 120#: matGrid(2, 3) = 150#: matGrid(2, 4) = 180#
+    matGrid(3, 1) = "QA":   matGrid(3, 2) = 90#:  matGrid(3, 3) = 110#: matGrid(3, 4) = 130#
+    ws.Range("B5:E7").Value = matGrid
+
+    Dim styler As New cTableStyler
+    styler.ApplyMatrixHeatmap ws.Range("B5:E7"), "RED_YELLOW_GREEN", HasRowHeaders:=True, HasColHeaders:=True
+    AssertTrue ws.Range("C6:E7").FormatConditions.Count > 0, "ApplyMatrixHeatmap applied color scale to data area"
+
+    styler.ApplyMatrixDataBars ws.Range("C6:E7"), 5287936, HasRowHeaders:=False, HasColHeaders:=False
+    AssertTrue ws.Range("C6:E7").FormatConditions.Count >= 2, "ApplyMatrixDataBars added databar condition"
+
+    ' --------------------------------------------------------------------------
+    ' 50.2: Multi-Level Header Unpivot (LoadFromMatrixRange with ColHeaderRowCount:=2, RowHeaderColCount:=2)
+    ' --------------------------------------------------------------------------
+    LogPrint "  [50.2] Multi-Level Header Unpivot..."
+    Dim multiGrid(1 To 4, 1 To 4) As Variant
+    multiGrid(1, 1) = "Dept": multiGrid(1, 2) = "Role": multiGrid(1, 3) = "2026": multiGrid(1, 4) = Empty
+    multiGrid(2, 1) = Empty:  multiGrid(2, 2) = Empty:  multiGrid(2, 3) = "Jan":  multiGrid(2, 4) = "Feb"
+    multiGrid(3, 1) = "Tech": multiGrid(3, 2) = "Dev":  multiGrid(3, 3) = 100#:  multiGrid(3, 4) = 110#
+    multiGrid(4, 1) = Empty:  multiGrid(4, 2) = "QA":   multiGrid(4, 3) = 80#:   multiGrid(4, 4) = 90#
+    ws.Range("G10:J13").Value = multiGrid
+
+    Dim dfMulti As New cDataFrame
+    dfMulti.LoadFromMatrixRange ws.Range("G10:J13"), _
+                                RowHeaderColOffset:=1, ColHeaderRowOffset:=1, _
+                                RowHeaderName:="Dept,Role", ColHeaderName:="Year,Month", ValueName:="Hours", _
+                                ColHeaderRowCount:=2, RowHeaderColCount:=2
+
+    AssertEqual dfMulti.RowCount, 4, "Multi-level unpivot extracted 4 rows"
+    AssertEqual dfMulti.ColumnCount, 5, "Multi-level unpivot created 5 separate columns"
+    AssertTrue dfMulti.HasColumn("Dept"), "HasColumn Dept"
+    AssertTrue dfMulti.HasColumn("Role"), "HasColumn Role"
+    AssertTrue dfMulti.HasColumn("Year"), "HasColumn Year"
+    AssertTrue dfMulti.HasColumn("Month"), "HasColumn Month"
+    AssertTrue dfMulti.HasColumn("Hours"), "HasColumn Hours"
+
+    AssertEqual dfMulti(1, "Dept"), "Tech", "Row 1 Dept = Tech"
+    AssertEqual dfMulti(1, "Role"), "Dev", "Row 1 Role = Dev"
+    AssertEqual dfMulti(1, "Year"), "2026", "Row 1 Year = 2026"
+    AssertEqual dfMulti(1, "Month"), "Jan", "Row 1 Month = Jan"
+    AssertEqual dfMulti(1, "Hours"), 100#, "Row 1 Hours = 100"
+
+    ' Check forward-filled row header on row 3 (Dept was Empty, inherited Tech)
+    AssertEqual dfMulti(3, "Dept"), "Tech", "Row 3 Dept forward-filled to Tech"
+    AssertEqual dfMulti(3, "Role"), "QA", "Row 3 Role = QA"
+
+    ' --------------------------------------------------------------------------
+    ' 50.3: MatrixDiff (Plan vs Actual Variance)
+    ' --------------------------------------------------------------------------
+    LogPrint "  [50.3] MatrixDiff..."
+    Dim dfPlan As New cDataFrame
+    dfPlan.AddColumn "Emp": dfPlan.AddColumn "Month": dfPlan.AddColumn "PlanHours"
+    dfPlan.AddRow "Alice", "Jan", 160#
+    dfPlan.AddRow "Alice", "Feb", 160#
+    dfPlan.AddRow "Bob", "Jan", 160#
+
+    Dim dfAct As New cDataFrame
+    dfAct.AddColumn "Emp": dfAct.AddColumn "Month": dfAct.AddColumn "ActualHours"
+    dfAct.AddRow "Alice", "Jan", 175#  ' Variance +15
+    dfAct.AddRow "Alice", "Feb", 140#  ' Variance -20
+    dfAct.AddRow "Bob", "Jan", 160#    ' Variance 0
+    dfAct.AddRow "Charlie", "Jan", 80# ' Extra row in Actual
+
+    Dim dfDiff As cDataFrame
+    Set dfDiff = dfPlan.MatrixDiff(dfAct, "Emp", "Month", "PlanHours", TargetValueCol:="ActualHours", _
+                                   DiffColName:="Variance", DiffMode:="ACTUAL_MINUS_PLAN", IncludePctDiff:=True)
+
+    AssertEqual dfDiff.RowCount, 4, "MatrixDiff combined 4 employee-month pairs"
+    AssertTrue dfDiff.HasColumn("Variance"), "HasColumn Variance"
+    AssertTrue dfDiff.HasColumn("PctVariance"), "HasColumn PctVariance"
+
+    ' Check Alice Jan
+    AssertEqual dfDiff(1, "Variance"), 15#, "Alice Jan variance is +15"
+    AssertEqual dfDiff(2, "Variance"), -20#, "Alice Feb variance is -20"
+    AssertEqual dfDiff(3, "Variance"), 0#, "Bob Jan variance is 0"
+    AssertEqual dfDiff(4, "Variance"), 80#, "Charlie Jan variance is +80 (new actual)"
+
+    xlApp.DisplayAlerts = False
+    On Error Resume Next
+    ThisWorkbook.Worksheets("MatrixEnhanceTest").Delete
+    On Error GoTo 0
+    xlApp.DisplayAlerts = True
+    Exit Sub
+
+TestFail:
+    Dim failErr As String
+    failErr = Err.Description
+    On Error Resume Next
+    ThisWorkbook.Application.DisplayAlerts = False
+    ThisWorkbook.Worksheets("MatrixEnhanceTest").Delete
+    ThisWorkbook.Application.DisplayAlerts = True
+    On Error GoTo 0
+    RecordFailure "Test_MatrixEnhancements", failErr
 End Sub

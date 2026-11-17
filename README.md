@@ -906,6 +906,32 @@ fe.SetTwoWayMatrixLookup TargetColKey:="LookupVal", _
                          MatchType:=0, IfErrorVal:=0#
 ```
 
+### Example 24: Matrix Enhancements (Heatmap, Multi-Level Unpivot & MatrixDiff Variance)
+
+```vb
+' --- 1. Apply Executive Heatmap & In-Cell Data Bars on Matrix ---
+Dim styler As New cTableStyler
+styler.ApplyMatrixHeatmap ws.Range("B5:N20"), PresetName:="RED_YELLOW_GREEN", HasRowHeaders:=True, HasColHeaders:=True
+styler.ApplyMatrixDataBars ws.Range("C6:N20"), BarColor:=5287936, HasRowHeaders:=False, HasColHeaders:=False
+
+' --- 2. Multi-Level Hierarchical Matrix Unpivot (Forward-Fill & Multi-Column Split) ---
+' Unpivots 2-level column headers (Year -> Month) and 2-level row headers (Dept -> Role) into separate columns:
+Dim dfHierarchical As New cDataFrame
+dfHierarchical.LoadFromMatrixRange ws.Range("G10:S30"), _
+                                   RowHeaderColOffset:=1, ColHeaderRowOffset:=1, _
+                                   RowHeaderName:="Department,Role", ColHeaderName:="Year,Month", ValueName:="Hours", _
+                                   ColHeaderRowCount:=2, RowHeaderColCount:=2
+
+' --- 3. Matrix Variance Analysis (Plan vs Actual Diff in RAM) ---
+Dim dfVariance As cDataFrame
+Set dfVariance = dfPlan.MatrixDiff(dfActual, RowKeyCol:="Emp", ColKeyCol:="Month", ValueCol:="PlanHours", _
+                                   TargetValueCol:="ActualHours", DiffColName:="Variance", IncludePctDiff:=True)
+
+' Directly export variance matrix and apply Heatmap styling:
+Call dfVariance.ToMatrixRange(ws.Range("B25"), "Emp", "Month", "Variance", "SUM", 0, "HEAT")
+styler.ApplyMatrixHeatmap ws.Range("B25:N40"), "HEAT", True, True
+```
+
 ---
 
 ## 6. End-to-End Demo Use-Cases (`mDemoWorkflow.bas`)
