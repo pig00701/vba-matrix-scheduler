@@ -91,6 +91,7 @@ Public Function RunAllTests() As String
     Test_GetDataAndRangeGaps
     Test_CleanAndTransformData
     Test_3DArrayAndMultiSheets
+    Test_CrossReferenceMatrix
 
     Dim tElapsed As Double
     tElapsed = Timer - tStart
@@ -4319,6 +4320,91 @@ TestFail:
     ThisWorkbook.Application.DisplayAlerts = True
     On Error GoTo 0
     RecordFailure "Test_3DArrayAndMultiSheets", failErr
+End Sub
+
+
+' ------------------------------------------------------------------------------
+' Test 49: Cross Reference Cell Matrix Operations
+' ------------------------------------------------------------------------------
+Private Sub Test_CrossReferenceMatrix()
+    On Error GoTo TestFail
+    LogPrint "[TEST 49] Cross Reference Cell Matrix Operations..."
+
+    Dim xlApp As Object
+    Set xlApp = ThisWorkbook.Application
+    xlApp.DisplayAlerts = False
+    On Error Resume Next
+    ThisWorkbook.Worksheets("MatrixTest").Delete
+    On Error GoTo TestFail
+    xlApp.DisplayAlerts = True
+
+    Dim ws As Object
+    Set ws = ThisWorkbook.Worksheets.Add(After:=ThisWorkbook.Worksheets(ThisWorkbook.Worksheets.Count))
+    ws.Name = "MatrixTest"
+
+    ' 1. Build flat DataFrame
+    Dim df As New cDataFrame
+    df.AddColumn "Emp"
+    df.AddColumn "Month"
+    df.AddColumn "Hours"
+    df.AddRow "Alice", "Jan", 160#
+    df.AddRow "Alice", "Feb", 150#
+    df.AddRow "Bob", "Jan", 170#
+    df.AddRow "Bob", "Feb", 165#
+
+    ' 2. ToMatrixRange: export as a custom matrix starting at B5
+    LogPrint "  [49.1] ToMatrixRange..."
+    Call df.ToMatrixRange(ws.Range("B5"), "Emp", "Month", "Hours", "SUM", 0, "NAVY")
+
+    AssertEqual ws.Range("B5").Value2, "Emp", "Top-left header of matrix is Emp"
+    AssertEqual ws.Range("B6").Value2, "Alice", "First row header is Alice"
+    AssertEqual ws.Range("B7").Value2, "Bob", "Second row header is Bob"
+    AssertTrue Len(CStr(ws.Range("C5").Value2)) > 0, "Column header 1 is present"
+    AssertTrue Len(CStr(ws.Range("D5").Value2)) > 0, "Column header 2 is present"
+    AssertTrue IsNumeric(ws.Range("C6").Value2), "Matrix cell C6 has numeric value"
+    AssertTrue IsNumeric(ws.Range("D7").Value2), "Matrix cell D7 has numeric value"
+
+    ' 3. LoadFromMatrixRange: unpivot custom matrix B5:D7 back to flat DataFrame
+    LogPrint "  [49.2] LoadFromMatrixRange..."
+    Dim dfFromMat As New cDataFrame
+    Call dfFromMat.LoadFromMatrixRange(ws.Range("B5:D7"), RowHeaderColOffset:=1, ColHeaderRowOffset:=1, _
+                                       RowHeaderName:="Employee", ColHeaderName:="Period", ValueName:="LoggedHours")
+
+    AssertEqual dfFromMat.RowCount, 4, "LoadFromMatrixRange extracted 4 unpivoted rows"
+    AssertEqual dfFromMat.ColumnCount, 3, "LoadFromMatrixRange extracted 3 columns"
+    AssertTrue dfFromMat.HasColumn("Employee"), "HasColumn Employee"
+    AssertTrue dfFromMat.HasColumn("Period"), "HasColumn Period"
+    AssertTrue dfFromMat.HasColumn("LoggedHours"), "HasColumn LoggedHours"
+
+    ' 4. FormulaEngine: ApplyTwoWayMatrixLookupToRange
+    LogPrint "  [49.3] ApplyTwoWayMatrixLookupToRange..."
+    Dim fe As New cFormulaEngine
+    fe.ApplyTwoWayMatrixLookupToRange ws.Range("F6"), ws.Range("B6"), ws.Range("D5"), _
+                                     ws.Range("C6:D7"), ws.Range("B6:B7"), ws.Range("C5:D5"), 0, "N/A"
+
+    Dim fStr As String
+    fStr = ws.Range("F6").Formula
+    AssertTrue InStr(fStr, "INDEX(") > 0, "2-way matrix formula contains INDEX"
+    AssertTrue InStr(fStr, "MATCH(") > 0, "2-way matrix formula contains MATCH"
+    AssertTrue InStr(fStr, "IFERROR(") > 0, "2-way matrix formula wrapped in IFERROR"
+    AssertEqual ws.Range("F6").Value2, ws.Range("D6").Value2, "2-way matrix lookup evaluated value matches matrix intersection"
+
+    xlApp.DisplayAlerts = False
+    On Error Resume Next
+    ThisWorkbook.Worksheets("MatrixTest").Delete
+    On Error GoTo 0
+    xlApp.DisplayAlerts = True
+    Exit Sub
+
+TestFail:
+    Dim failErr As String
+    failErr = Err.Description
+    On Error Resume Next
+    ThisWorkbook.Application.DisplayAlerts = False
+    ThisWorkbook.Worksheets("MatrixTest").Delete
+    ThisWorkbook.Application.DisplayAlerts = True
+    On Error GoTo 0
+    RecordFailure "Test_CrossReferenceMatrix", failErr
 End Sub
 
 Private Sub SafeDeleteName(ByVal AnchorName As String)

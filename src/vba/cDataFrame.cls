@@ -6790,3 +6790,116 @@ Public Function LoadFromSheets(Optional ByVal SheetPatternOrNames As Variant = "
 
     Set LoadFromSheets = Me
 End Function
+
+
+' Ingests a 2D matrix range (Row Headers x Column Headers) from a worksheet and unpivots it into a 3-column DataFrame.
+Public Function LoadFromMatrixRange(ByVal MatrixRange As Object, _
+                                    Optional ByVal RowHeaderColOffset As Long = 1, _
+                                    Optional ByVal ColHeaderRowOffset As Long = 1, _
+                                    Optional ByVal RowHeaderName As String = "RowKey", _
+                                    Optional ByVal ColHeaderName As String = "ColKey", _
+                                    Optional ByVal ValueName As String = "Value", _
+                                    Optional ByVal SkipEmptyValues As Boolean = True) As cDataFrame
+    If MatrixRange Is Nothing Then
+        Err.Raise 91, "cDataFrame.LoadFromMatrixRange", "MatrixRange cannot be Nothing."
+    End If
+
+    Dim vData As Variant
+    vData = MatrixRange.Value2
+
+    If Not IsArray(vData) Then
+        Err.Raise 5, "cDataFrame.LoadFromMatrixRange", "MatrixRange must cover at least 2 rows and 2 columns."
+    End If
+
+    Dim rLb As Long, rUb As Long, cLb As Long, cUb As Long
+    rLb = LBound(vData, 1): rUb = UBound(vData, 1)
+    cLb = LBound(vData, 2): cUb = UBound(vData, 2)
+
+    Dim headerRowIdx As Long, headerColIdx As Long
+    headerRowIdx = rLb + ColHeaderRowOffset - 1
+    headerColIdx = cLb + RowHeaderColOffset - 1
+
+    If headerRowIdx < rLb Or headerRowIdx > rUb Or headerColIdx < cLb Or headerColIdx > cUb Then
+        Err.Raise 5, "cDataFrame.LoadFromMatrixRange", "Header offsets are out of bounds of the supplied MatrixRange."
+    End If
+
+    ' Extract column headers
+    Dim colKeys As New Collection
+    Dim colIdxList As New Collection
+    Dim c As Long
+    For c = cLb To cUb
+        If c <> headerColIdx Then
+            Dim chVal As Variant
+            chVal = vData(headerRowIdx, c)
+            If Not IsEmpty(chVal) And Len(Trim$(CStr(chVal))) > 0 Then
+                colKeys.Add CStr(chVal)
+                colIdxList.Add c
+            End If
+        End If
+    Next c
+
+    ' Initialize this DataFrame with 3 columns: RowHeaderName, ColHeaderName, ValueName
+    mCols.RemoveAll
+    mRowCount = 0
+    Set mRowIndexMap = Nothing
+    mIndexColumnName = ""
+    mIndexDirty = False
+
+    Dim colRow As cColumn, colCol As cColumn, colVal As cColumn
+    Set colRow = Me.AddColumn(RowHeaderName)
+    Set colCol = Me.AddColumn(ColHeaderName)
+    Set colVal = Me.AddColumn(ValueName)
+
+    Dim r As Long, i As Long
+    Dim rKeyVal As Variant, cellVal As Variant
+    For r = rLb To rUb
+        If r <> headerRowIdx Then
+            rKeyVal = vData(r, headerColIdx)
+            If Not IsEmpty(rKeyVal) And Len(Trim$(CStr(rKeyVal))) > 0 Then
+                For i = 1 To colKeys.Count
+                    c = colIdxList.Item(i)
+                    cellVal = vData(r, c)
+                    If Not SkipEmptyValues Or (Not IsEmpty(cellVal) And Len(Trim$(CStr(cellVal))) > 0) Then
+                        colRow.Append rKeyVal
+                        colCol.Append colKeys.Item(i)
+                        colVal.Append cellVal
+                    End If
+                Next i
+            End If
+        End If
+    Next r
+
+    mRowCount = colRow.Count
+    Set LoadFromMatrixRange = Me
+End Function
+
+' Pivots the DataFrame by RowKeyCol x ColKeyCol with ValueCol, and outputs the cross-reference matrix to TargetAnchorCell.
+Public Function ToMatrixRange(ByVal TargetAnchorCell As Object, _
+                              ByVal RowKeyCol As Variant, _
+                              ByVal ColKeyCol As Variant, _
+                              ByVal ValueCol As Variant, _
+                              Optional ByVal AggFunc As String = "SUM", _
+                              Optional ByVal FillEmptyValue As Variant = Empty, _
+                              Optional ByVal ThemeName As String = "NAVY", _
+                              Optional ByVal AutoFit As Boolean = True) As cDataFrame
+    If TargetAnchorCell Is Nothing Then
+        Err.Raise 91, "cDataFrame.ToMatrixRange", "TargetAnchorCell cannot be Nothing."
+    End If
+
+    Dim pDf As cDataFrame
+    Set pDf = Me.Pivot(RowKeyCol, ColKeyCol, ValueCol, AggFunc, FillEmptyValue)
+
+    If Len(Trim$(ThemeName)) > 0 And UCase$(Trim$(ThemeName)) <> "NONE" Then
+        pDf.ToStyledRange TargetAnchorCell, ThemeName, True
+    Else
+        pDf.ToRange TargetAnchorCell, True
+    End If
+
+    If AutoFit Then
+        On Error Resume Next
+        TargetAnchorCell.Worksheet.UsedRange.Columns.AutoFit
+        On Error GoTo 0
+    End If
+
+    Set ToMatrixRange = Me
+End Function

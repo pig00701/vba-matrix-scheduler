@@ -2612,3 +2612,100 @@ Public Function ConvertRangeToValues(ByVal TargetRange As Object) As cFormulaEng
     TargetRange.Value2 = TargetRange.Value2
     Set ConvertRangeToValues = Me
 End Function
+
+
+' Injects a 2-Way Matrix Cross-Reference Lookup (=INDEX(DataRange, MATCH(RowVal, RowHeaders, 0), MATCH(ColVal, ColHeaders, 0))) into TargetColKey.
+Public Function SetTwoWayMatrixLookup(ByVal TargetColKey As Variant, _
+                                      ByVal MatchRowValColKey As Variant, _
+                                      ByVal MatchColValColKey As Variant, _
+                                      ByVal MatrixDataAddress As String, _
+                                      ByVal MatrixRowHeadersAddress As String, _
+                                      ByVal MatrixColHeadersAddress As String, _
+                                      Optional ByVal MatrixSheetName As String = "", _
+                                      Optional ByVal MatchType As Long = 0, _
+                                      Optional ByVal IfErrorVal As Variant) As cFormulaEngine
+    CheckAttached "SetTwoWayMatrixLookup"
+
+    Dim rColIdx As Long, cColIdx As Long
+    rColIdx = ResolveColIndex(MatchRowValColKey)
+    cColIdx = ResolveColIndex(MatchColValColKey)
+
+    Dim rColLetter As String, cColLetter As String
+    rColLetter = ColIndexToLetter(mDataBodyRange.Column + rColIdx - 1)
+    cColLetter = ColIndexToLetter(mDataBodyRange.Column + cColIdx - 1)
+
+    Dim sheetRef As String
+    If Len(MatrixSheetName) > 0 Then
+        If InStr(MatrixSheetName, " ") > 0 Or InStr(MatrixSheetName, "-") > 0 Then
+            sheetRef = "'" & Replace(MatrixSheetName, "'", "''") & "'!"
+        Else
+            sheetRef = MatrixSheetName & "!"
+        End If
+    Else
+        sheetRef = ""
+    End If
+
+    Dim coreFormula As String
+    coreFormula = "INDEX(" & sheetRef & MatrixDataAddress & ", MATCH(" & rColLetter & "{row}, " & _
+                  sheetRef & MatrixRowHeadersAddress & ", " & CStr(MatchType) & "), MATCH(" & _
+                  cColLetter & "{row}, " & sheetRef & MatrixColHeadersAddress & ", " & CStr(MatchType) & "))"
+
+    Dim tmpl As String
+    If Not IsMissing(IfErrorVal) And Not IsEmpty(IfErrorVal) Then
+        Dim errStr As String
+        If VarType(IfErrorVal) = vbString Then
+            errStr = Chr(34) & Replace(CStr(IfErrorVal), Chr(34), Chr(34) & Chr(34)) & Chr(34)
+        Else
+            errStr = CStr(IfErrorVal)
+        End If
+        tmpl = "=IFERROR(" & coreFormula & ", " & errStr & ")"
+    Else
+        tmpl = "=" & coreFormula
+    End If
+
+    Set SetTwoWayMatrixLookup = SetColumnFormula(TargetColKey, tmpl, UseAutoFill:=True)
+End Function
+
+' Injects a 2-way cross reference lookup formula directly into any arbitrary Range
+Public Sub ApplyTwoWayMatrixLookupToRange(ByVal TargetCellOrRange As Object, _
+                                         ByVal LookupRowValCell As Object, _
+                                         ByVal LookupColValCell As Object, _
+                                         ByVal MatrixDataRange As Object, _
+                                         ByVal MatrixRowHeadersRange As Object, _
+                                         ByVal MatrixColHeadersRange As Object, _
+                                         Optional ByVal MatchType As Long = 0, _
+                                         Optional ByVal IfErrorVal As Variant)
+    If TargetCellOrRange Is Nothing Then Err.Raise 91, "cFormulaEngine", "TargetCellOrRange cannot be Nothing."
+    If LookupRowValCell Is Nothing Then Err.Raise 91, "cFormulaEngine", "LookupRowValCell cannot be Nothing."
+    If LookupColValCell Is Nothing Then Err.Raise 91, "cFormulaEngine", "LookupColValCell cannot be Nothing."
+    If MatrixDataRange Is Nothing Then Err.Raise 91, "cFormulaEngine", "MatrixDataRange cannot be Nothing."
+    If MatrixRowHeadersRange Is Nothing Then Err.Raise 91, "cFormulaEngine", "MatrixRowHeadersRange cannot be Nothing."
+    If MatrixColHeadersRange Is Nothing Then Err.Raise 91, "cFormulaEngine", "MatrixColHeadersRange cannot be Nothing."
+
+    Dim dataAddr As String, rowHdrAddr As String, colHdrAddr As String
+    dataAddr = MatrixDataRange.Address(True, True, 1, True)
+    rowHdrAddr = MatrixRowHeadersRange.Address(True, True, 1, True)
+    colHdrAddr = MatrixColHeadersRange.Address(True, True, 1, True)
+
+    Dim rowValAddr As String, colValAddr As String
+    rowValAddr = LookupRowValCell.Address(False, True)
+    colValAddr = LookupColValCell.Address(True, False)
+
+    Dim coreFormula As String
+    coreFormula = "INDEX(" & dataAddr & ", MATCH(" & rowValAddr & ", " & rowHdrAddr & ", " & CStr(MatchType) & "), MATCH(" & colValAddr & ", " & colHdrAddr & ", " & CStr(MatchType) & "))"
+
+    Dim finalFormula As String
+    If Not IsMissing(IfErrorVal) And Not IsEmpty(IfErrorVal) Then
+        Dim errStr As String
+        If VarType(IfErrorVal) = vbString Then
+            errStr = Chr(34) & Replace(CStr(IfErrorVal), Chr(34), Chr(34) & Chr(34)) & Chr(34)
+        Else
+            errStr = CStr(IfErrorVal)
+        End If
+        finalFormula = "=IFERROR(" & coreFormula & ", " & errStr & ")"
+    Else
+        finalFormula = "=" & coreFormula
+    End If
+
+    TargetCellOrRange.Formula = finalFormula
+End Sub

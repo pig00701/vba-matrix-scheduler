@@ -33,6 +33,7 @@
 | `LoadFromJSON(JsonString)` | `Function As cDataFrame` | แปลง JSON String (`RECORDS` หรือ `SPLIT`) เข้า DataFrame |
 | `LoadFrom3DArray(Data3D, [HasHeaders], [LayerNames], [LayerColumnName])` | `Function As cDataFrame` | คลี่ 3D Variant Array `(Row, Col, Layer)` เป็นตาราง 2D พร้อมระบุคอลัมน์ Layer (เช่น Quarter/Sheet) |
 | `LoadFromSheets([SheetPatternOrNames], [TargetWorkbook], [HasHeaders], [AddSheetColumn], [SheetColumnName], [ExcludeSheets])` | `Function As cDataFrame` | โหลดและรวมตารางจากหลาย Worksheet ตามชื่อหรือ wildcard (เช่น `Array("Q1", "Q2")` หรือ `"Data_*"`) |
+| `LoadFromMatrixRange(MatrixRange, [RowHeaderColOffset], [ColHeaderRowOffset], [RowHeaderName], [ColHeaderName], [ValueName], [SkipEmptyValues])` | `Function As cDataFrame` | อ่านและ unpivot ตาราง Cross-Reference Matrix บน Range ที่กำหนดเอง (ระบุแถว/คอลัมน์หัวตารางได้) กลับเป็น 3 คอลัมน์ `(RowKey, ColKey, Value)` |
 
 ```vba
 Dim df As New cDataFrame
@@ -131,6 +132,7 @@ Set dfSkills = df.Explode("skills", ",")
 | `ToMarkdown([MaxRows])` / `ToHTML([TableClass])` | `Function As String` | แปลงเป็นตาราง Markdown หรือ HTML |
 | `To3DArray(LayerColumnKey, [IncludeHeaders])` | `Function As Variant` | แยกกลุ่ม DataFrame ตาม LayerColumnKey ออกมาเป็น 3D Variant Array `(Row, Col, Layer)` |
 | `ToMultiSheets(SplitColumnKey, [TargetWorkbook], [ThemeName], [AutoFit], [ClearExistingSheets])` | `Function As cDataFrame` | แยกกลุ่ม DataFrame ตาม SplitColumnKey แล้วส่งออกแต่ละกลุ่มลง Worksheet แยกเฉพาะแผ่นพร้อมตกแต่งสไตล์ |
+| `ToMatrixRange(TargetAnchorCell, RowKeyCol, ColKeyCol, ValueCol, [AggFunc], [FillEmptyValue], [ThemeName], [AutoFit])` | `Function As cDataFrame` | สรุป DataFrame เป็นตาราง Cross-Reference Matrix (Pivot) แล้วส่งออกลงพิกัดเซลล์ที่กำหนดเองพร้อมจัดสไตล์ |
 
 ---
 
@@ -439,7 +441,8 @@ classDiagram
 | ค้นหาค่าแบบ O(1) Hash Key (`df.Loc`) | 10,000 แถว | **0.000000 วินาที** ($O(1)$) |
 | รัน GroupBy Hash Aggregation (100 กลุ่ม) | 10,000 แถว | **0.078 วินาที** |
 | จัดการ 3D Variant Array & Multi-Sheet Union/Split | cDataFrame | **< 0.050 วินาที** |
-| ทดสอบครบ 48 ชุดหมวดหมู่ฟังก์ชัน (**979 assertions**) | ทุกคลาส | **6.086 วินาที** (100% PASS) |
+| ประมวลผล Cross-Reference Matrix (Load/To/2-Way Lookup) | cDataFrame / cFormulaEngine | **< 0.040 วินาที** |
+| ทดสอบครบ 49 ชุดหมวดหมู่ฟังก์ชัน (**995 assertions**) | ทุกคลาส | **7.932 วินาที** (100% PASS) |
 
 ---
 
