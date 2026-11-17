@@ -134,6 +134,10 @@ Set dfSkills = df.Explode("skills", ",")
 | `To3DArray(LayerColumnKey, [IncludeHeaders])` | `Function As Variant` | แยกกลุ่ม DataFrame ตาม LayerColumnKey ออกมาเป็น 3D Variant Array `(Row, Col, Layer)` |
 | `ToMultiSheets(SplitColumnKey, [TargetWorkbook], [ThemeName], [AutoFit], [ClearExistingSheets])` | `Function As cDataFrame` | แยกกลุ่ม DataFrame ตาม SplitColumnKey แล้วส่งออกแต่ละกลุ่มลง Worksheet แยกเฉพาะแผ่นพร้อมตกแต่งสไตล์ |
 | `ToMatrixRange(TargetAnchorCell, RowKeyCol, ColKeyCol, ValueCol, [AggFunc], [FillEmptyValue], [ThemeName], [AutoFit])` | `Function As cDataFrame` | สรุป DataFrame เป็นตาราง Cross-Reference Matrix (Pivot) แล้วส่งออกลงพิกัดเซลล์ที่กำหนดเองพร้อมจัดสไตล์ |
+| `ToSparseCoordinates(RowKeyCol, ColKeyCol, ValueCol, [IgnoreZero=True], [ZeroThreshold])` | `Function As cDataFrame` | กรองตารางให้เหลือเฉพาะพิกัดข้อมูลจริง (Coordinate List: `RowKey, ColKey, Value`) โดยตัดเซลล์ว่าง, Null, และเลข 0 ออกในรอบเดียว $O(N)$ |
+| `GetSparseMatrixStats(RowKeyCol, ColKeyCol, ValueCol, [IgnoreZero=True], [ZeroThreshold])` | `Function As Object` | คืนค่า Dictionary รายงานสถิติความเบาบาง (Sparsity Ratio %, NonZeroCount, ZeroCount, MemorySavedPercent) |
+| `SparseMatrixAggregate(RowKeyCol, ColKeyCol, ValueCol, [OutRowTotals], [OutColTotals], [AggFunc="SUM"])` | `Function As Double` | คำนวณผลรวมแถว (Row Total), ผลรวมคอลัมน์ (Col Total), และยอดรวมทั้งหมดในเวลา $O(\text{NonZero})$ โดยไม่ต้องจอง Grid เต็มผืน |
+| `ToSparseMatrixRange(TargetAnchorCell, RowKeyCol, ColKeyCol, ValueCol, [AggFunc="SUM"], [FillEmptyValue=0#], [ThemeName="NAVY"], [IncludeRowTotals=True], [IncludeColTotals=True], [AutoFit=True])` | `Function As cDataFrame` | ส่งออกตารางเมทริกซ์เบาบางลงบน Range พร้อมคำนวณแถวและคอลัมน์ผลรวมขอบตาราง (Marginal Totals) อัตโนมัติ |
 
 ---
 

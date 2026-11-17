@@ -932,6 +932,31 @@ Call dfVariance.ToMatrixRange(ws.Range("B25"), "Emp", "Month", "Variance", "SUM"
 styler.ApplyMatrixHeatmap ws.Range("B25:N40"), "HEAT", True, True
 ```
 
+### Example 25: Sparse Matrix Optimization Suite & Marginal Totals
+
+```vb
+' --- 1. Compute Sparsity Diagnostics & Statistics ---
+' Analyzes large dataset (e.g. 5,000 employees x 365 days = 1.8M potential cells):
+Dim stats As Object
+Set stats = dfLarge.GetSparseMatrixStats("Employee", "Date", "LoggedHours", IgnoreZero:=True)
+Debug.Print "Sparsity: " & Format$(stats("Sparsity"), "0.0%")
+Debug.Print "Non-zero count: " & stats("NonZeroCount")
+Debug.Print "RAM saved: " & Format$(stats("MemorySavedPercent"), "0.0%")
+
+' --- 2. Compact to Coordinate List (COO) in O(N) single-pass ---
+Dim dfSparse As cDataFrame
+Set dfSparse = dfLarge.ToSparseCoordinates("Employee", "Date", "LoggedHours", IgnoreZero:=True)
+
+' --- 3. Instant Aggregation in O(NonZero) time without building full 2D grid ---
+Dim rowTotals As Object, colTotals As Object
+Dim grandTotal As Double
+grandTotal = dfSparse.SparseMatrixAggregate("Employee", "Date", "LoggedHours", rowTotals, colTotals)
+
+' --- 4. Export Sparse Matrix with Auto Marginal Totals (Row & Col Grand Totals) ---
+Call dfSparse.ToSparseMatrixRange(ws.Range("B5"), "Employee", "Date", "LoggedHours", "SUM", 0#, "NAVY", _
+                                  IncludeRowTotals:=True, IncludeColTotals:=True)
+```
+
 ---
 
 ## 6. End-to-End Demo Use-Cases (`mDemoWorkflow.bas`)

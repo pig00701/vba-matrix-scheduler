@@ -93,6 +93,7 @@ Public Function RunAllTests() As String
     Test_3DArrayAndMultiSheets
     Test_CrossReferenceMatrix
     Test_MatrixEnhancements
+    Test_SparseMatrixOptimization
 
     Dim tElapsed As Double
     tElapsed = Timer - tStart
@@ -4602,4 +4603,115 @@ TestFail:
     ThisWorkbook.Application.DisplayAlerts = True
     On Error GoTo 0
     RecordFailure "Test_MatrixEnhancements", failErr
+End Sub
+
+' ------------------------------------------------------------------------------
+' Test 51: Sparse Matrix Optimization Suite
+' ------------------------------------------------------------------------------
+Private Sub Test_SparseMatrixOptimization()
+    On Error GoTo TestFail
+    LogPrint "[TEST 51] Sparse Matrix Optimization Suite..."
+
+    Dim xlApp As Object
+    Set xlApp = ThisWorkbook.Application
+    xlApp.DisplayAlerts = False
+    On Error Resume Next
+    ThisWorkbook.Worksheets("SparseTest").Delete
+    On Error GoTo TestFail
+    xlApp.DisplayAlerts = True
+
+    Dim ws As Object
+    Set ws = ThisWorkbook.Worksheets.Add(After:=ThisWorkbook.Worksheets(ThisWorkbook.Worksheets.Count))
+    ws.Name = "SparseTest"
+
+    ' --------------------------------------------------------------------------
+    ' 51.1: Build a sparse dataset (5 people x 10 days = 50 cells, but only 5 non-zeros)
+    ' --------------------------------------------------------------------------
+    LogPrint "  [51.1] ToSparseCoordinates & Sparsity Stats..."
+    Dim dfRaw As New cDataFrame
+    dfRaw.AddColumn "Emp": dfRaw.AddColumn "Day": dfRaw.AddColumn "Hours"
+
+    ' Non-zero records
+    dfRaw.AddRow "Alice", "Day1", 8#
+    dfRaw.AddRow "Alice", "Day5", 4#
+    dfRaw.AddRow "Bob", "Day2", 8#
+    dfRaw.AddRow "Charlie", "Day10", 6#
+    dfRaw.AddRow "David", "Day3", 8#
+
+    ' Zeros and empty rows that should be filtered in sparse mode
+    dfRaw.AddRow "Eve", "Day1", 0#
+    dfRaw.AddRow "Eve", "Day2", Empty
+    dfRaw.AddRow "Bob", "Day5", 0#
+    dfRaw.AddRow "David", "Day10", 0#
+
+    ' Get sparse stats
+    Dim stats As Object
+    Set stats = dfRaw.GetSparseMatrixStats("Emp", "Day", "Hours", IgnoreZero:=True)
+
+    AssertEqual stats("UniqueRows"), 5, "Sparsity Stats: 5 unique employees"
+    AssertEqual stats("UniqueCols"), 5, "Sparsity Stats: 5 unique days"
+    AssertEqual stats("TotalGridCells"), 25#, "Total grid cells = 5x5 = 25"
+    AssertEqual stats("NonZeroCount"), 5, "Non-zero count is 5"
+    AssertEqual stats("ZeroCount"), 20#, "Zero/Empty count is 20"
+    AssertEqual stats("Sparsity"), 0.8, "Sparsity is 80%"
+    AssertEqual stats("MemorySavedPercent"), 80#, "Memory saved is 80%"
+
+    ' ToSparseCoordinates
+    Dim dfSparse As cDataFrame
+    Set dfSparse = dfRaw.ToSparseCoordinates("Emp", "Day", "Hours", IgnoreZero:=True)
+
+    AssertEqual dfSparse.RowCount, 5, "ToSparseCoordinates kept only the 5 non-zero rows"
+    AssertEqual dfSparse.ColumnCount, 3, "ToSparseCoordinates returned 3 columns"
+
+    ' --------------------------------------------------------------------------
+    ' 51.2: SparseMatrixAggregate in O(NonZero) time without building full 2D grid
+    ' --------------------------------------------------------------------------
+    LogPrint "  [51.2] SparseMatrixAggregate..."
+    Dim rowTotals As Object, colTotals As Object
+    Dim grandTotal As Double
+    grandTotal = dfRaw.SparseMatrixAggregate("Emp", "Day", "Hours", rowTotals, colTotals)
+
+    AssertEqual grandTotal, 34#, "SparseMatrixAggregate grand total = 8+4+8+6+8 = 34"
+    AssertEqual rowTotals("Alice"), 12#, "Alice sparse row total = 8 + 4 = 12"
+    AssertEqual rowTotals("Bob"), 8#, "Bob sparse row total = 8"
+    AssertEqual colTotals("Day1"), 8#, "Day1 sparse col total = 8"
+
+    ' --------------------------------------------------------------------------
+    ' 51.3: ToSparseMatrixRange with Marginal Totals (Row & Column Grand Totals)
+    ' --------------------------------------------------------------------------
+    LogPrint "  [51.3] ToSparseMatrixRange with Marginal Totals..."
+    Call dfSparse.ToSparseMatrixRange(ws.Range("B5"), "Emp", "Day", "Hours", "SUM", 0#, "NAVY", _
+                                     IncludeRowTotals:=True, IncludeColTotals:=True)
+
+    AssertEqual ws.Range("B5").Value2, "Emp", "Top-left cell is Emp"
+    ' Verify marginal totals were created
+    Dim lastColHeader As String
+    lastColHeader = CStr(ws.Range("H5").Value2)
+    AssertEqual lastColHeader, "Total", "Far-right column header is 'Total'"
+
+    Dim lastRowHeader As String
+    lastRowHeader = CStr(ws.Range("B10").Value2)
+    AssertEqual lastRowHeader, "Total", "Bottom row header is 'Total'"
+
+    ' Grand Total intersection cell (Row Total x Col Total) at H10
+    Dim gTotalVal As Double
+    gTotalVal = CDbl(ws.Range("H10").Value2)
+    AssertEqual gTotalVal, 34#, "Bottom-right grand total intersection is 34"
+
+    xlApp.DisplayAlerts = False
+    On Error Resume Next
+    ThisWorkbook.Worksheets("SparseTest").Delete
+    On Error GoTo 0
+    xlApp.DisplayAlerts = True
+    Exit Sub
+
+TestFail:
+    Dim failErr As String
+    failErr = Err.Description
+    On Error Resume Next
+    ThisWorkbook.Application.DisplayAlerts = False
+    ThisWorkbook.Worksheets("SparseTest").Delete
+    ThisWorkbook.Application.DisplayAlerts = True
+    On Error GoTo 0
+    RecordFailure "Test_SparseMatrixOptimization", failErr
 End Sub
